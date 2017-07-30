@@ -293,6 +293,8 @@ def cdfg_dot(args, graph):
 
     with f:
         print('digraph {', file=f)
+        if args.group_basic_blocks:
+            print('compound=true;', file=f)
 
         for floating in method.cdfg.floating.nodes:
             print(
@@ -306,6 +308,10 @@ def cdfg_dot(args, graph):
 
         for block in method.cdfg.blocks:
             prev = None
+            if args.group_basic_blocks:
+                print('subgraph "cluster_bb_{}" {{'.format(block.num), file=f)
+                print('label="bb {}";'.format(block.num), file=f)
+                print('color=black;', file=f)
             for node in block.nodes.nodes:
                 print(
                     '"{}" [label="{}"]'.format(
@@ -328,16 +334,27 @@ def cdfg_dot(args, graph):
 
                 prev = node
 
+            if args.group_basic_blocks:
+                print('}', file=f)
+
             for i, exit in enumerate(block.exits):
                 target_block = method.cdfg.block_by_num(exit)
                 src_node = block.nodes.nodes[-1]
                 dest_node = target_block.nodes.nodes[0]
 
+                cluster_attrs = ""
+                if args.group_basic_blocks:
+                    cluster_attrs = ',lhead="cluster_bb_{}",ltail="cluster_bb_{}"'.format(
+                        target_block.num,
+                        block.num,
+                    )
+
                 print(
-                    '"{}" -> "{}" [taillabel="branch {}"];'.format(
+                    '"{}" -> "{}" [taillabel="branch {}"{}];'.format(
                         src_node.node,
                         dest_node.node,
                         i,
+                        cluster_attrs,
                     ),
                     file=f
                 )
@@ -379,6 +396,11 @@ def main():
         "outfile",
         nargs="?",
         help="File to dump the graph to"
+    )
+    subparser.add_argument(
+        "-g", "--group-basic-blocks",
+        action="store_true",
+        default=False,
     )
 
     args = parser.parse_args()
