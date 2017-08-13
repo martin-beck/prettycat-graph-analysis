@@ -5,6 +5,8 @@ import typing
 
 import lxml.etree
 
+from .xmlutil import ASM
+
 
 class AbstractNode:
     def __init__(self, unique_id):
@@ -32,7 +34,7 @@ class Node(AbstractNode):
         return self._unique_id
 
     @property
-    def inputs(self) -> typing.Iterable[str]:
+    def inputs(self) -> typing.Iterable['Node']:
         """
         A list of unique IDs of input nodes.
         """
@@ -51,6 +53,38 @@ class Node(AbstractNode):
         return self._block
 
 
+class ASMNode(Node):
+    def __init__(self, unique_id,
+                 line: typing.Optional[int] = None,
+                 opcode: typing.Optional[int] = None):
+        super().__init__(unique_id)
+        self._line = line
+        self._opcode = opcode
+
+    @property
+    def line(self):
+        return self._line
+
+    @property
+    def opcode(self):
+        return self._opcode
+
+    @property
+    def local_id(self):
+        return self.unique_id.split("/", 1)[1]
+
+
+class ParameterNode(Node):
+    def __init__(self, unique_id,
+                 type_: typing.Optional[str] = None):
+        super().__init__(unique_id)
+        self._type = type_
+
+    @property
+    def type_(self):
+        return self._type
+
+
 class CallNode(Node):
     @property
     def call_target(self) -> str:
@@ -63,6 +97,12 @@ class CallNode(Node):
         """
         List of parameters to pass.
         """
+
+
+def node_from_xml(tree):
+    if tree.tag == IrGraph.node:
+        return Node(tree.get("id"))
+    raise ValueError("unsupported node: {}".format(tree.tag))
 
 
 class BasicBlock(AbstractNode):
@@ -104,6 +144,10 @@ class ControlDataFlowGraph:
             *(block.nodes for block in self._blocks)
         )
 
+    @property
+    def floating_nodes(self) -> typing.Iterable[Node]:
+        return iter(self._floating_nodes)
+
     def block_by_node(self, node: Node) -> BasicBlock:
         """
         Return the block to which a node belongs.
@@ -144,14 +188,15 @@ class ControlDataFlowGraph:
 
     def new_node(self, class_, *,
                  block: typing.Optional[BasicBlock] = None,
-                 id_: typing.Optional[str] = None) -> Node:
+                 id_: typing.Optional[str] = None,
+                 **kwargs) -> Node:
         """
         Create a new node.
         """
         if not id_:
             id_ = "urn:uuid:" + str(uuid.uuid4())
 
-        node = class_(id_)
+        node = class_(id_, **kwargs)
         node._block = block
         if block:
             if block._nodes:
@@ -203,7 +248,17 @@ class ControlDataFlowGraph:
         at._successors.append(successor)
         successor._predecessors.append(at)
 
-    def split_block(self, at_node: Node):
+    def add_input(self, at: Node, source: Node):
+        """
+        Add an input to a node.
+
+        .. note::
+
+            This does not check that the data flow graph is still valid.
+        """
+        at._inputs.append(source)
+
+    def split_block(self, at_node: Node) -> BasicBlock:
         """
         Split the basic block of a node such that the node and its successors
         are in a new basic block.
@@ -226,6 +281,42 @@ class ControlDataFlowGraph:
 
         return block
 
+    def join_blocks(self, b1: BasicBlock, b2: BasicBlock) -> BasicBlock:
+        """
+        Join two basic blocks by appending the second to the first.
+
+        :param b1: First basic block
+        :type b1: :class:`BasicBlock`
+        :param b2: Second basic block
+        :type b2: :class:`BasicBlock`
+        :raises ValueError: if `b1` and `b2` are the same basic block
+        :raises ValueError: if `b1` and `b2` cannot be joined due to control
+            flow
+        :return: The first basic block
+        :rtype: :class:`BasicBlock`
+
+        If `b1` is equal to `b2`, :class:`ValueError` is raised.
+
+        If `b1` or `b2` is empty, the nodes are simply moved to `b1` and `b2`
+        is discarded.
+
+        If the last node of `b1` has not exactly one successor or if the
+        successor is not the first node of `b2`, :class:`ValueError` is raised.
+        If the first node of `b2` has not exactly one predecessor or if the
+        predecessor is not the last node of `b1`, :class:`ValueError` is
+        raised.
+        """
+        if b2 not in b1.exits and b2._nodes and b1._nodes:
+            raise ValueError("b2 is not a successor of b1")
+        if b1._nodes and len(b1._nodes[-1]._successors) > 1:
+            raise ValueError("b1 has multiple successors")
+        if b2._nodes and len(b2._nodes[0]._predecessors) > 1:
+            raise ValueError("b2 has multiple predecessors")
+        b1._nodes.extend(b2._nodes)
+        b2._nodes.clear()
+        self._blocks.remove(b2)
+        return b1
+
     def inline_call(self, call_node: Node, method_cdfg):
         """
         Inline a given call node.
@@ -243,7 +334,98 @@ class ControlDataFlowGraph:
         responsibility to avoid recursive inlining.
         """
 
-    def load_from_xml(self, tree: lxml.etree.Element):
+    def simplify_basic_blocks(self):
         """
-        Load the control/data flow graph from an XML element.
+        Simplify the basic blocks in the CDFG.
+
+        The basic blocks are expanded as far as possible.
         """
+
+        while True:
+            for bb in self._blocks:
+                if not bb._nodes:
+                    continue
+                last = bb._nodes[-1]
+                if len(last._successors) != 1:
+                    continue
+                dest = last._successors[0].block
+                if len(dest._nodes[0]._predecessors) != 1:
+                    continue
+                self.join_blocks(bb, dest)
+                break
+            else:
+                break
+
+
+def _load_param_nodes(cdfg: ControlDataFlowGraph,
+                      xmlparams: lxml.etree.Element):
+
+    for i, xmlparam in enumerate(xmlparams.iterchildren()):
+        node = cdfg.new_node(
+            ParameterNode,
+            id_=xmlparam.get("id"),
+            type_=xmlparam.get("type_"),
+        )
+
+
+def _load_asm_nodes(cdfg: ControlDataFlowGraph,
+                    method: str,
+                    xmlnodes: lxml.etree.Element):
+    edges = []
+    inputs = []
+
+    for i, xmlnode in enumerate(xmlnodes.iterchildren()):
+        bb_id = "{}/basic-blocks/{}".format(method, i)
+        bb = cdfg.new_block(id_=bb_id)
+        node = cdfg.new_node(
+            ASMNode,
+            id_=xmlnode.get("id"),
+            block=bb,
+            line=int(xmlnode.get("line", "-1")),
+            opcode=int(xmlnode.get("opcode", "-1")),
+        )
+        xmlexits = xmlnode.find(ASM.exits)
+        if xmlexits is not None:
+            for exit in xmlexits:
+                edges.append(
+                    (node.unique_id, exit.get("to"))
+                )
+        xmlinputs = xmlnode.find(ASM.inputs)
+        if xmlinputs is not None:
+            for input_ in xmlinputs:
+                if input_.tag == ASM("value-of"):
+                    inputs.append(
+                        (input_.get("from"), node.unique_id),
+                    )
+                else:
+                    raise ValueError("unsupported input: {!r}".format(
+                        input_.tag,
+                    ))
+
+    for from_, to in edges:
+        from_node = cdfg.node_by_id(from_)
+        to_node = cdfg.node_by_id(to)
+
+        cdfg.add_successor(from_node, to_node)
+
+    for from_, to in inputs:
+        from_node = cdfg.node_by_id(from_)
+        to_node = cdfg.node_by_id(to)
+
+        cdfg.add_input(to_node, from_node)
+
+
+def load_asm(tree: lxml.etree.Element) -> ControlDataFlowGraph:
+    result = ControlDataFlowGraph()
+
+    params = tree.find(ASM.parameters)
+    if params is not None:
+        _load_param_nodes(result, params)
+
+    insns = tree.find(ASM.insns)
+    if insns is not None:
+        _load_asm_nodes(result, tree.get("id"), insns)
+
+    result.simplify_basic_blocks()
+
+    return result

@@ -2,270 +2,113 @@
 import itertools
 import typing
 
+import prettycdfg.nodes
+
+from prettycdfg.xmlutil import ASM
+
 import lxml.etree as etree
 
 
-class Namespace:
-    def __init__(self, ns):
-        super().__init__()
-        self.__dict__["namespace"] = ns
+def load_graphs(f):
+    with f:
+        tree = etree.parse(f)
 
-    def __getattr__(self, name):
-        if name.startswith("__") and name.endswith("__"):
-            return super().__getattr__(name)
-        return self(name)
+    methods = {}
+    if tree.getroot().tag == ASM.asm:
+        loader = prettycdfg.nodes.load_asm
+    else:
+        raise ValueError("unsupported graph type: {!r}".format(
+            tree.getroot().tag
+        ))
 
-    def __call__(self, name):
-        return "{{{}}}{}".format(self.__dict__["namespace"], name)
+    for xmlmethod in tree.getroot():
+        id_ = xmlmethod.get("id")
+        methods[id_] = loader(xmlmethod)
 
-
-IrGraph = Namespace("https://xmlns.zombofant.net/prettycat/1.0/ir-graph")
-
-
-class Node:
-    def __init__(self):
-        super().__init__()
-        self.slot = None
-        self.node = None
-        self.type_ = None
-        self.inputs = []
-
-    @classmethod
-    def from_tree(cls, tree):
-        instance = cls()
-        instance.slot = tree.get("slot")
-        instance.node = tree.get("node")
-        instance.type_ = tree.get("type_")
-
-        inputs = tree.find(IrGraph.inputs)
-
-        if inputs is not None:
-            instance.inputs = [
-                node.get("object")
-                for node in inputs.iterchildren(IrGraph.input)
-            ]
-
-        if tree.tag == IrGraph.call:
-            instance.parameters = [
-                (int(node.get("slot")), node.get("object"))
-                for node in tree.iterchildren(IrGraph("pass"))
-            ]
-            instance.inputs = [
-                object_
-                for _, object_ in instance.parameters
-            ]
-
-        return instance
+    return methods
 
 
-class NodeContainer:
-    def __init__(self):
-        super().__init__()
-        self.nodes = []
-
-    @classmethod
-    def from_tree(cls, tree):
-        instance = cls()
-        instance.nodes = [
-            Node.from_tree(node)
-            for node in tree.iterchildren()
-        ]
-        return instance
-
-
-class Block:
-    def __init__(self):
-        super().__init__()
-        self.num = None
-        self.nodes = None
-
-    def joined_inputs(self) -> typing.Set[str]:
-        result = set()
-        for node in self.nodes.nodes:
-            if node.inputs:
-                result.update(node.inputs)
-        return result
-
-    @classmethod
-    def from_tree(cls, tree):
-        instance = cls()
-        instance.num = int(tree.get("num"))
-        instance.nodes = NodeContainer.from_tree(tree.find(IrGraph.nodes))
-        instance.exits = [
-            int(exit.get("block"))
-            for exit in tree.find(IrGraph.exits).iterchildren(IrGraph.exit)
-        ]
-        return instance
-
-    def __repr__(self):
-        return "<{}.{} num={!r} #nodes={!r} at 0x{:x}>".format(
-            type(self).__module__,
-            type(self).__qualname__,
-            self.num,
-            len(self.nodes.nodes),
-            id(self)
-        )
-
-
-class CDFG:
-    def __init__(self):
-        super().__init__()
-        self.floating = None
-        self.blocks = []
-
-    def block_by_num(self, num: int) -> Block:
-        for block in self.blocks:
-            if block.num == num:
-                return block
-        raise KeyError(num)
-
-    def node_by_slot(self, slot: str) -> Node:
-        for node in itertools.chain(self.floating.nodes,
-                                    *(block.nodes.nodes
-                                      for block in self.blocks)):
-            if node.slot == slot:
-                return node
-        raise KeyError(slot)
-
-    def block_by_node(self, node: Node) -> Block:
-        for block in self.blocks:
-            if node in block.nodes.nodes:
-                return block
-        raise KeyError(node)
-
-    @classmethod
-    def from_tree(cls, tree):
-        instance = cls()
-        instance.floating = NodeContainer.from_tree(tree.find(IrGraph.floating))
-        instance.blocks = [
-            Block.from_tree(block)
-            for block in tree.iterchildren(IrGraph.block)
-        ]
-        return instance
-
-    def __repr__(self):
-        return "<{}.{} #floating={!r} #blocks={!r} at 0x{:x}>".format(
-            type(self).__module__,
-            type(self).__qualname__,
-            len(self.floating.nodes),
-            len(self.blocks),
-        )
-
-
-class Method:
-    def __init__(self, id_):
-        super().__init__()
-        self.id_ = id_
-        self.parameters = []
-
-    def get_class(self):
-        return self.id_.rsplit(".", 1)[0]
-
-    @classmethod
-    def from_tree(cls, tree):
-        instance = cls(tree.get("id"))
-        for parameter in tree.find(IrGraph.parameters).iterchildren():
-            if parameter.tag == IrGraph.this:
-                parameter = (instance.id_ + "/param:0", instance.get_class())
-            else:
-                parameter = (parameter.get("slot"), parameter.get("type"))
-            instance.parameters.append(parameter)
-        instance.cdfg = CDFG.from_tree(tree.find(IrGraph.cdfg))
-        return instance
-
-    def __repr__(self):
-        return "<{}.{} id_={!r} parameters={!r} at 0x{:x}>".format(
-            type(self).__module__,
-            type(self).__qualname__,
-            self.id_,
-            self.parameters,
-            id(self)
-        )
-
-
-class Graph:
-    def __init__(self):
-        super().__init__()
-        self.methods = {}
-
-    def load(self, tree):
-        methods = (
-            Method.from_tree(method)
-            for method in tree.iterchildren(IrGraph.method)
-        )
-        self.methods = {
-            method.id_: method
-            for method in methods
-        }
-
-
-def bb_graph_dot(args, graph):
-    method = graph.methods[args.method]
+def bb_graph_dot(args,
+                 graphs: typing.Mapping[
+                     str,
+                     prettycdfg.nodes.ControlDataFlowGraph]):
+    cdfg = graphs[args.method]
 
     if args.outfile is None:
         f = sys.stdout
     else:
         f = open(args.outfile, "w")
 
+    def joined_inputs(block):
+        for node in block.nodes:
+            yield from node.inputs
+
     with f:
         print("digraph {", file=f)
-        for floating in method.cdfg.floating.nodes:
-            print('"{}" [label="{}"];'.format(floating.slot, floating.node), file=f)
+        for floating in cdfg.floating_nodes:
+            print(
+                '"{}" [label="{}"];'.format(
+                    floating.unique_id,
+                    floating.unique_id,
+                ),
+                file=f
+            )
             for input_ in floating.inputs:
                 try:
-                    node = method.cdfg.node_by_slot(input_)
+                    node = cdfg.node_by_id(input_)
                 except KeyError:
                     continue
                 try:
-                    src_block = method.cdfg.block_by_node(node)
+                    src_block = cdfg.block_by_node(node)
                 except KeyError:
                     print(
                         '"{}" -> "{}" [style=dashed];'.format(
-                            node.slot,
-                            floating.slot,
+                            node.unique_id,
+                            floating.unique_id,
                         ),
                         file=f
                     )
                 else:
                     print(
                         'bb_{} -> "{}" [style=dashed];'.format(
-                            src_block.num,
-                            floating.slot
+                            src_block.unique_id,
+                            floating.unique_id
                         ),
                         file=f
                     )
-        for block in method.cdfg.blocks:
-            print("bb_{};".format(block.num), file=f)
+
+        for block in cdfg.blocks:
+            print('"bb_{}";'.format(block.unique_id), file=f)
             for exit in block.exits:
-                print("bb_{} -> bb_{};".format(block.num, exit), file=f)
-            for input_ in block.joined_inputs():
+                print('"bb_{}" -> "bb_{}";'.format(block.unique_id,
+                                                   exit.unique_id), file=f)
+            for node in joined_inputs(block):
                 try:
-                    node = method.cdfg.node_by_slot(input_)
-                except KeyError:
-                    continue
-                try:
-                    src_block = method.cdfg.block_by_node(node)
+                    src_block = cdfg.block_by_node(node)
                 except KeyError:
                     print(
-                        '"{}" -> bb_{} [style=dashed];'.format(
-                            node.slot,
-                            block.num,
+                        '"{}" -> "bb_{}" [style=dashed];'.format(
+                            node.unique_id,
+                            block.unique_id,
                         ),
                         file=f
                     )
                 else:
                     print(
-                        "bb_{} -> bb_{} [style=dashed];".format(
-                            src_block.num,
-                            block.num,
+                        '"bb_{}" -> "bb_{}" [style=dashed];'.format(
+                            src_block.unique_id,
+                            block.unique_id,
                         ),
                         file=f
                     )
         print("}", file=f)
 
 
-def cdfg_dot(args, graph):
-    method = graph.methods[args.method]
+def cdfg_dot(args,
+             graphs: typing.Mapping[
+                 str,
+                 prettycdfg.nodes.ControlDataFlowGraph]):
+    cdfg = graphs[args.method]
 
     if args.outfile is None:
         f = sys.stdout
@@ -274,18 +117,10 @@ def cdfg_dot(args, graph):
 
     def emit_inputs(node, f):
         for i, input_ in enumerate(node.inputs):
-            try:
-                src_node = method.cdfg.node_by_slot(input_)
-            except KeyError:
-                # FIXME: parameters don’t have nodes
-                src_node = input_
-            else:
-                src_node = src_node.node
-
             print(
                 '"{}" -> "{}" [style=dashed,headlabel="in {}"]'.format(
-                    src_node,
-                    node.node,
+                    input_.unique_id,
+                    node.unique_id,
                     i,
                 ),
                 file=f
@@ -296,27 +131,27 @@ def cdfg_dot(args, graph):
         if args.group_basic_blocks:
             print('compound=true;', file=f)
 
-        for floating in method.cdfg.floating.nodes:
+        for floating in cdfg.floating_nodes:
             print(
                 '"{}" [label="{}"];'.format(
-                    floating.node,
-                    floating.node,
+                    floating.unique_id,
+                    floating.unique_id,
                 ),
                 file=f
             )
             emit_inputs(floating, f)
 
-        for block in method.cdfg.blocks:
+        for block in cdfg.blocks:
             prev = None
             if args.group_basic_blocks:
-                print('subgraph "cluster_bb_{}" {{'.format(block.num), file=f)
-                print('label="bb {}";'.format(block.num), file=f)
+                print('subgraph "cluster_bb_{}" {{'.format(block.unique_id), file=f)
+                print('label="bb {}";'.format(block.unique_id), file=f)
                 print('color=black;', file=f)
-            for node in block.nodes.nodes:
+            for node in block.nodes:
                 print(
                     '"{}" [label="{}"]'.format(
-                        node.node,
-                        node.node,
+                        node.unique_id,
+                        node.local_id,
                     ),
                     file=f
                 )
@@ -324,8 +159,8 @@ def cdfg_dot(args, graph):
                 if prev is not None:
                     print(
                         '"{}" -> "{}";'.format(
-                            prev.node,
-                            node.node,
+                            prev.unique_id,
+                            node.unique_id,
                         ),
                         file=f
                     )
@@ -337,22 +172,21 @@ def cdfg_dot(args, graph):
             if args.group_basic_blocks:
                 print('}', file=f)
 
-            for i, exit in enumerate(block.exits):
-                target_block = method.cdfg.block_by_num(exit)
-                src_node = block.nodes.nodes[-1]
-                dest_node = target_block.nodes.nodes[0]
+            for i, target_block in enumerate(block.exits):
+                src_node = list(block.nodes)[-1]
+                dest_node = list(target_block.nodes)[0]
 
                 cluster_attrs = ""
                 if args.group_basic_blocks:
                     cluster_attrs = ',lhead="cluster_bb_{}",ltail="cluster_bb_{}"'.format(
-                        target_block.num,
-                        block.num,
+                        target_block.unique_id,
+                        block.unique_id,
                     )
 
                 print(
                     '"{}" -> "{}" [taillabel="branch {}"{}];'.format(
-                        src_node.node,
-                        dest_node.node,
+                        src_node.unique_id,
+                        dest_node.unique_id,
                         i,
                         cluster_attrs,
                     ),
@@ -410,12 +244,8 @@ def main():
         parser.print_help()
         return 1
 
-    with args.graph as f:
-        data = etree.parse(f)
-
-    graph = Graph()
-    graph.load(data.getroot())
-    args.func(args, graph)
+    methods = load_graphs(args.graph)
+    args.func(args, methods)
 
 
 if __name__ == "__main__":
