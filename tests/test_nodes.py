@@ -5,6 +5,8 @@ import unittest.mock
 import prettycdfg.nodes as nodes
 import prettycdfg.xmlutil as xmlutil
 
+from prettycdfg.opcodes import Opcode
+
 import lxml.builder
 
 
@@ -49,6 +51,20 @@ class TestNode(unittest.TestCase):
         with self.assertRaisesRegex(AttributeError, "can't set"):
             self.n.block = self.n.block
 
+    def test_is_return(self):
+        self.assertFalse(self.n.is_return)
+
+    def test_is_return_is_read_only(self):
+        with self.assertRaisesRegex(AttributeError, "can't set"):
+            self.n.is_return = self.n.is_return
+
+    def test_is_parameter(self):
+        self.assertFalse(self.n.is_parameter)
+
+    def test_is_parameter_is_read_only(self):
+        with self.assertRaisesRegex(AttributeError, "can't set"):
+            self.n.is_parameter = self.n.is_parameter
+
 
 class TestBasicBlock(unittest.TestCase):
     def setUp(self):
@@ -77,6 +93,7 @@ class TestControlDataFlowGraph(unittest.TestCase):
         self.cdfg = nodes.ControlDataFlowGraph()
 
     def tearDown(self):
+        self.cdfg.assert_consistency()
         del self.cdfg
 
     def test_new_block(self):
@@ -133,6 +150,28 @@ class TestControlDataFlowGraph(unittest.TestCase):
         self.assertCountEqual(self.cdfg.nodes, [node])
         self.assertCountEqual(bb.nodes, [node])
         self.assertCountEqual(self.cdfg.floating_nodes, [])
+
+    def test_new_node_with_block_with_successors(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+        bb3 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n1")
+        n2 = self.cdfg.new_node(nodes.Node, block=bb2, id_="n2")
+        n3 = self.cdfg.new_node(nodes.Node, block=bb3, id_="n3")
+
+        self.cdfg.add_successor(n1, n2)
+        self.cdfg.add_successor(n1, n3)
+
+        n4 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n4")
+
+        self.assertCountEqual(n1.successors, [n4])
+
+        self.assertCountEqual(n4.predecessors, [n1])
+        self.assertCountEqual(n4.successors, [n2, n3])
+
+        self.assertCountEqual(n2.predecessors, [n4])
+        self.assertCountEqual(n3.predecessors, [n4])
 
     def test_block_by_node(self):
         bb1 = self.cdfg.new_block()
@@ -268,6 +307,306 @@ class TestControlDataFlowGraph(unittest.TestCase):
         self.assertCountEqual(n2.successors, [])
         self.assertCountEqual(n2.predecessors, [n20])
 
+    def test_move_node_to_trivially_insert_a_floating_node_in_a_bb(self):
+        bb1 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1)
+        n2 = self.cdfg.new_node(nodes.Node, block=bb1)
+        n3 = self.cdfg.new_node(nodes.Node, block=bb1)
+
+        n4 = self.cdfg.new_node(nodes.Node)
+
+        self.cdfg.move_node(n4, n3)
+
+        self.assertCountEqual(n2.successors, [n4])
+        self.assertCountEqual(n4.successors, [n3])
+        self.assertCountEqual(n4.predecessors, [n2])
+        self.assertCountEqual(n3.predecessors, [n4])
+
+    def test_move_node_to_insert_floating_node_to_head_of_bb(self):
+        bb1 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1)
+        n2 = self.cdfg.new_node(nodes.Node, block=bb1)
+        n3 = self.cdfg.new_node(nodes.Node, block=bb1)
+
+        n4 = self.cdfg.new_node(nodes.Node)
+
+        self.cdfg.move_node(n4, n1)
+
+        self.assertCountEqual(n4.predecessors, [])
+        self.assertCountEqual(n4.successors, [n1])
+        self.assertCountEqual(n1.predecessors, [n4])
+
+    def test_move_node_to_insert_floating_node_to_head_of_forked_bb(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+        bb3 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1)
+        n2 = self.cdfg.new_node(nodes.Node, block=bb1)
+        n3 = self.cdfg.new_node(nodes.Node, block=bb2)
+        n4 = self.cdfg.new_node(nodes.Node, block=bb3)
+
+        n5 = self.cdfg.new_node(nodes.Node)
+
+        self.cdfg.add_successor(n2, n3)
+        self.cdfg.add_successor(n2, n4)
+
+        self.cdfg.move_node(n5, n3)
+
+        self.assertCountEqual(n5.predecessors, [n2])
+        self.assertCountEqual(n5.successors, [n3])
+        self.assertCountEqual(n3.predecessors, [n5])
+        self.assertCountEqual(n2.successors, [n5, n4])
+        self.assertIs(n5.block, n3.block)
+        self.assertSequenceEqual(list(n5.block.nodes), [n5, n3])
+        self.assertCountEqual(self.cdfg.floating_nodes, [])
+
+    def test_move_node_with_predecessor(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n1")
+        n2 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n2")
+
+        n3 = self.cdfg.new_node(nodes.Node, block=bb2, id_="n3")
+
+        self.cdfg.move_node(n2, n3)
+
+        self.assertCountEqual(n1.successors, [])
+        self.assertCountEqual(n2.successors, [n3])
+        self.assertCountEqual(n2.predecessors, [])
+        self.assertCountEqual(n3.predecessors, [n2])
+
+        self.assertIs(n2.block, n3.block)
+        self.assertSequenceEqual(list(n3.block.nodes), [n2, n3])
+        self.assertSequenceEqual(list(n1.block.nodes), [n1])
+
+    def test_move_node_with_multiple_successors(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+        bb3 = self.cdfg.new_block()
+        bb4 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n1")
+        n2 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n2")
+        n3 = self.cdfg.new_node(nodes.Node, block=bb2, id_="n3")
+        n4 = self.cdfg.new_node(nodes.Node, block=bb3, id_="n4")
+
+        n5 = self.cdfg.new_node(nodes.Node, block=bb4, id_="n5")
+
+        self.cdfg.add_successor(n2, n3)
+        self.cdfg.add_successor(n2, n4)
+
+        self.cdfg.move_node(n2, n5)
+
+        self.assertCountEqual(n2.predecessors, [])
+        self.assertCountEqual(n2.successors, [n5])
+
+        self.assertCountEqual(n3.predecessors, [n1])
+        self.assertCountEqual(n4.predecessors, [n1])
+        self.assertCountEqual(n1.successors, [n3, n4])
+
+        self.assertIs(n2.block, n5.block)
+        self.assertSequenceEqual(list(n5.block.nodes), [n2, n5])
+        self.assertSequenceEqual(list(n1.block.nodes), [n1])
+
+    def test_move_node_with_multiple_predecessors(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+        bb3 = self.cdfg.new_block()
+        bb4 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n1")
+        n2 = self.cdfg.new_node(nodes.Node, block=bb2, id_="n2")
+        n3 = self.cdfg.new_node(nodes.Node, block=bb2, id_="n3")
+        n4 = self.cdfg.new_node(nodes.Node, block=bb3, id_="n4")
+
+        n5 = self.cdfg.new_node(nodes.Node, block=bb4, id_="n5")
+
+        self.cdfg.add_successor(n1, n2)
+        self.cdfg.add_successor(n1, n4)
+
+        self.cdfg.move_node(n2, n5)
+
+        self.assertCountEqual(n2.predecessors, [])
+        self.assertCountEqual(n2.successors, [n5])
+
+        self.assertCountEqual(n3.predecessors, [n1])
+        self.assertCountEqual(n1.successors, [n3, n4])
+
+        self.assertIs(n2.block, n5.block)
+        self.assertSequenceEqual(list(n5.block.nodes), [n2, n5])
+        self.assertSequenceEqual(list(n3.block.nodes), [n3])
+
+    def test_reject_move_node_with_multiple_predecessors_and_successors(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+        bb3 = self.cdfg.new_block()
+        bb4 = self.cdfg.new_block()
+        bb5 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n1")
+        n2 = self.cdfg.new_node(nodes.Node, block=bb2, id_="n2")
+        n3 = self.cdfg.new_node(nodes.Node, block=bb3, id_="n3")
+        n4 = self.cdfg.new_node(nodes.Node, block=bb4, id_="n4")
+        n5 = self.cdfg.new_node(nodes.Node, block=bb5, id_="n5")
+
+        n6 = self.cdfg.new_node(nodes.Node, block=self.cdfg.new_block(),
+                                id_="n6")
+
+        self.cdfg.add_successor(n1, n3)
+        self.cdfg.add_successor(n2, n3)
+        self.cdfg.add_successor(n3, n4)
+        self.cdfg.add_successor(n3, n5)
+
+        with self.assertRaisesRegex(
+                ValueError,
+                r"cannot detach node with multiple predecessors and multiple "
+                r"successors"):
+            self.cdfg.move_node(n3, n6)
+
+        self.assertCountEqual(n1.successors, [n3])
+        self.assertCountEqual(n2.successors, [n3])
+        self.assertCountEqual(n3.predecessors, [n1, n2])
+        self.assertCountEqual(n3.successors, [n4, n5])
+        self.assertCountEqual(n4.predecessors, [n3])
+        self.assertCountEqual(n5.predecessors, [n3])
+
+        self.assertIs(n3.block, bb3)
+        self.assertSequenceEqual(list(n3.block.nodes), [n3])
+        self.assertSequenceEqual(list(n6.block.nodes), [n6])
+
+    def test_detach_node_rejects_floating_node(self):
+        n1 = self.cdfg.new_node(nodes.Node)
+
+        with self.assertRaisesRegex(
+                ValueError,
+                r"cannot detach floating node"):
+            self.cdfg.detach_node(n1)
+
+    def test_detach_node_from_within_a_bb(self):
+        bb1 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n1")
+        n2 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n2")
+        n3 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n3")
+
+        self.cdfg.detach_node(n2)
+
+        self.assertIs(n2.block, None)
+        self.assertSequenceEqual(list(bb1.nodes), [n1, n3])
+        self.assertSequenceEqual(list(self.cdfg.floating_nodes), [n2])
+
+        self.assertCountEqual(n1.successors, [n3])
+        self.assertCountEqual(n2.successors, [])
+        self.assertCountEqual(n3.successors, [])
+
+        self.assertCountEqual(n1.predecessors, [])
+        self.assertCountEqual(n2.predecessors, [])
+        self.assertCountEqual(n3.predecessors, [n1])
+
+    def test_detach_node_with_multiple_successors(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+        bb3 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n1")
+        n2 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n2")
+        n3 = self.cdfg.new_node(nodes.Node, block=bb2, id_="n3")
+        n4 = self.cdfg.new_node(nodes.Node, block=bb3, id_="n4")
+
+        self.cdfg.add_successor(n2, n3)
+        self.cdfg.add_successor(n2, n4)
+
+        self.cdfg.detach_node(n2)
+
+        self.assertIs(n2.block, None)
+        self.assertSequenceEqual(list(bb1.nodes), [n1])
+        self.assertSequenceEqual(list(self.cdfg.floating_nodes), [n2])
+
+        self.assertCountEqual(n1.successors, [n3, n4])
+        self.assertCountEqual(n2.successors, [])
+        self.assertCountEqual(n3.successors, [])
+        self.assertCountEqual(n4.successors, [])
+
+        self.assertCountEqual(n1.predecessors, [])
+        self.assertCountEqual(n2.predecessors, [])
+        self.assertCountEqual(n3.predecessors, [n1])
+        self.assertCountEqual(n4.predecessors, [n1])
+
+    def test_detach_node_with_multiple_predecessors(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+        bb3 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n1")
+        n2 = self.cdfg.new_node(nodes.Node, block=bb2, id_="n2")
+        n3 = self.cdfg.new_node(nodes.Node, block=bb3, id_="n3")
+        n4 = self.cdfg.new_node(nodes.Node, block=bb3, id_="n4")
+
+        self.cdfg.add_successor(n1, n3)
+        self.cdfg.add_successor(n2, n3)
+
+        self.cdfg.detach_node(n3)
+
+        self.assertIs(n3.block, None)
+        self.assertSequenceEqual(list(bb3.nodes), [n4])
+        self.assertSequenceEqual(list(self.cdfg.floating_nodes), [n3])
+
+        self.assertCountEqual(n1.successors, [n4])
+        self.assertCountEqual(n2.successors, [n4])
+        self.assertCountEqual(n3.successors, [])
+        self.assertCountEqual(n4.successors, [])
+
+        self.assertCountEqual(n1.predecessors, [])
+        self.assertCountEqual(n2.predecessors, [])
+        self.assertCountEqual(n3.predecessors, [])
+        self.assertCountEqual(n4.predecessors, [n1, n2])
+
+    def test_reject_detach_node_with_multiple_predecessors_and_successors(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+        bb3 = self.cdfg.new_block()
+        bb4 = self.cdfg.new_block()
+        bb5 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n1")
+        n2 = self.cdfg.new_node(nodes.Node, block=bb2, id_="n2")
+        n3 = self.cdfg.new_node(nodes.Node, block=bb3, id_="n3")
+        n4 = self.cdfg.new_node(nodes.Node, block=bb4, id_="n4")
+        n5 = self.cdfg.new_node(nodes.Node, block=bb5, id_="n5")
+
+        self.cdfg.add_successor(n1, n3)
+        self.cdfg.add_successor(n2, n3)
+        self.cdfg.add_successor(n3, n4)
+        self.cdfg.add_successor(n3, n5)
+
+        with self.assertRaisesRegex(
+                ValueError,
+                r"cannot detach node with multiple predecessors and multiple "
+                r"successors"):
+            self.cdfg.detach_node(n3)
+
+        self.assertIs(n3.block, bb3)
+        self.assertSequenceEqual(list(self.cdfg.floating_nodes), [])
+
+        self.assertCountEqual(n1.successors, [n3])
+        self.assertCountEqual(n1.predecessors, [])
+
+        self.assertCountEqual(n2.successors, [n3])
+        self.assertCountEqual(n2.predecessors, [])
+
+        self.assertCountEqual(n3.successors, [n4, n5])
+        self.assertCountEqual(n3.predecessors, [n1, n2])
+
+        self.assertCountEqual(n4.successors, [])
+        self.assertCountEqual(n4.predecessors, [n3])
+
+        self.assertCountEqual(n5.successors, [])
+        self.assertCountEqual(n5.predecessors, [n3])
+
     def test_split_block(self):
         bb1 = self.cdfg.new_block()
 
@@ -371,17 +710,18 @@ class TestControlDataFlowGraph(unittest.TestCase):
         self.assertIs(self.cdfg.block_by_node(n1), bb1)
 
     def test_join_blocks_b1_empty(self):
-        bb1 = self.cdfg.new_block()
-        bb2 = self.cdfg.new_block()
+        bb1 = self.cdfg.new_block(id_="bb1")
+        bb2 = self.cdfg.new_block(id_="bb2")
 
-        n1 = self.cdfg.new_node(nodes.Node, block=bb2)
+        n1 = self.cdfg.new_node(nodes.Node, block=bb2, id_="n1")
 
         self.assertIs(self.cdfg.join_blocks(bb1, bb2), bb1)
 
         self.assertCountEqual(self.cdfg.blocks, [bb1])
         self.assertCountEqual(self.cdfg.nodes, [n1])
-        self.assertCountEqual(bb1.nodes, [n1])
-        self.assertCountEqual(bb2.nodes, [])
+        self.assertSequenceEqual(list(bb1.nodes), [n1])
+        self.assertSequenceEqual(list(bb2.nodes), [])
+        self.assertIs(n1.block, bb1)
         self.assertIs(self.cdfg.block_by_node(n1), bb1)
 
     def test_join_blocks_nonempty_consecutive(self):
@@ -486,6 +826,314 @@ class TestControlDataFlowGraph(unittest.TestCase):
         self.assertIs(self.cdfg.block_by_node(n4), bb4)
         self.assertIs(self.cdfg.block_by_node(n5), bb4)
 
+    def test_remove_node_fixes_control_flow(self):
+        bb1 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1)
+        n2 = self.cdfg.new_node(nodes.Node, block=bb1)
+        n3 = self.cdfg.new_node(nodes.Node, block=bb1)
+
+        self.cdfg.remove_node(n2)
+
+        self.assertCountEqual(self.cdfg.nodes, [n1, n3])
+
+        self.assertCountEqual(n1.successors, [n3])
+        self.assertCountEqual(n3.predecessors, [n1])
+
+        self.assertCountEqual(n2.successors, [])
+        self.assertCountEqual(n2.predecessors, [])
+        self.assertIsNone(n2.block)
+
+        with self.assertRaises(KeyError):
+            self.cdfg.block_by_node(n2)
+
+    def test_remove_node_fixes_branching_control_flow(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+        bb3 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1)
+        n2 = self.cdfg.new_node(nodes.Node, block=bb1)
+
+        n3 = self.cdfg.new_node(nodes.Node, block=bb2)
+        n4 = self.cdfg.new_node(nodes.Node, block=bb3)
+
+        self.cdfg.add_successor(n2, n3)
+        self.cdfg.add_successor(n2, n4)
+
+        self.cdfg.remove_node(n2)
+
+        self.assertCountEqual(self.cdfg.nodes, [n1, n3, n4])
+
+        self.assertCountEqual(n1.successors, [n3, n4])
+        self.assertCountEqual(n3.predecessors, [n1])
+        self.assertCountEqual(n4.predecessors, [n1])
+
+        self.assertCountEqual(n2.successors, [])
+        self.assertCountEqual(n2.predecessors, [])
+        self.assertIsNone(n2.block)
+
+    def test_remove_node_fixes_data_flow(self):
+        bb1 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1)
+        n2 = self.cdfg.new_node(nodes.Node, block=bb1)
+        n3 = self.cdfg.new_node(nodes.Node, block=bb1)
+
+        print(n1, n2, n3)
+
+        self.cdfg.add_input(n2, n1)
+        self.cdfg.add_input(n3, n2)
+
+        self.cdfg.remove_node(n2)
+
+        self.assertCountEqual(n3.inputs, [])
+        self.assertCountEqual(n2.inputs, [])
+
+    def test_remove_floating_node(self):
+        n1 = self.cdfg.new_node(nodes.Node)
+
+        self.cdfg.remove_node(n1)
+
+        self.assertCountEqual(self.cdfg.floating_nodes, [])
+
+    def test_merge_copies_control_flow(self):
+        cdfg2 = nodes.ControlDataFlowGraph()
+        bb2_1 = cdfg2.new_block()
+        bb2_2 = cdfg2.new_block()
+        bb2_3 = cdfg2.new_block()
+        n2_1 = cdfg2.new_node(nodes.Node, block=bb2_1)
+        n2_2 = cdfg2.new_node(nodes.Node, block=bb2_1)
+        n2_3 = cdfg2.new_node(nodes.Node, block=bb2_2)
+        n2_4 = cdfg2.new_node(nodes.Node, block=bb2_3)
+
+        cdfg2.add_successor(n2_2, n2_3)
+        cdfg2.add_successor(n2_2, n2_4)
+
+        self.assertSequenceEqual(list(cdfg2.nodes), [n2_1, n2_2, n2_3, n2_4])
+        self.assertSequenceEqual(list(cdfg2.blocks), [bb2_1, bb2_2, bb2_3])
+
+        (n1, n2, n3, n4), (bb1, bb2, bb3) = self.cdfg.merge(cdfg2)
+
+        self.assertSequenceEqual(list(self.cdfg.nodes), [n1, n2, n3, n4])
+        self.assertSequenceEqual(list(self.cdfg.blocks), [bb1, bb2, bb3])
+
+        self.assertIs(n1.block, bb1)
+        self.assertIs(n2.block, bb1)
+        self.assertIs(n3.block, bb2)
+        self.assertIs(n4.block, bb3)
+
+        self.assertCountEqual(n1.successors, [n2], n1)
+        self.assertCountEqual(n2.successors, [n3, n4], n2)
+        self.assertCountEqual(n3.successors, [], n3)
+        self.assertCountEqual(n4.successors, [], n4)
+
+        self.assertCountEqual(n1.predecessors, [], n1)
+        self.assertCountEqual(n2.predecessors, [n1], n2)
+        self.assertCountEqual(n3.predecessors, [n2], n3)
+        self.assertCountEqual(n4.predecessors, [n2], n4)
+
+    def test_merge_copies_data_flow(self):
+        cdfg2 = nodes.ControlDataFlowGraph()
+        bb2_1 = cdfg2.new_block()
+        n2_1 = cdfg2.new_node(nodes.Node, block=bb2_1)
+        n2_2 = cdfg2.new_node(nodes.Node, block=bb2_1)
+        n2_3 = cdfg2.new_node(nodes.Node, block=bb2_1)
+
+        cdfg2.add_input(n2_2, n2_1)
+        cdfg2.add_input(n2_3, n2_1)
+        cdfg2.add_input(n2_3, n2_2)
+
+        self.assertSequenceEqual(list(cdfg2.nodes), [n2_1, n2_2, n2_3])
+        self.assertSequenceEqual(list(cdfg2.blocks), [bb2_1])
+
+        (n1, n2, n3), (bb1,) = self.cdfg.merge(cdfg2)
+
+        self.assertSequenceEqual(list(self.cdfg.nodes), [n1, n2, n3])
+        self.assertSequenceEqual(list(self.cdfg.blocks), [bb1])
+
+        self.assertIs(n1.block, bb1)
+        self.assertIs(n2.block, bb1)
+        self.assertIs(n3.block, bb1)
+
+        self.assertCountEqual(n3.inputs, [n2, n1])
+        self.assertCountEqual(n2.inputs, [n1])
+
+    def test_remove_successor_between_blocks(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n1")
+        n2 = self.cdfg.new_node(nodes.Node, block=bb2, id_="n2")
+
+        self.cdfg.add_successor(n1, n2)
+
+        self.cdfg.remove_successor(n1, n2)
+
+        self.assertCountEqual(n1.successors, [])
+        self.assertCountEqual(n2.predecessors, [])
+
+    def test_raises_proper_error_if_not_connected(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n1")
+        n2 = self.cdfg.new_node(nodes.Node, block=bb2, id_="n2")
+
+        with self.assertRaisesRegex(
+                ValueError,
+                "<[^>]+ 'n2'> is not a successor of <[^>]+ 'n1'>"):
+            self.cdfg.remove_successor(n1, n2)
+
+    def test_rejects_disconnect_of_nodes_within_bb(self):
+        bb1 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n1")
+        n2 = self.cdfg.new_node(nodes.Node, block=bb1, id_="n2")
+
+        with self.assertRaisesRegex(
+                ValueError,
+                "cannot remove successors within basic block; "
+                "use split_block instead"):
+            self.cdfg.remove_successor(n1, n2)
+
+        self.assertCountEqual(n1.successors, [n2])
+        self.assertCountEqual(n2.predecessors, [n1])
+
+    def test_inline_trivial(self):
+        cdfg2 = nodes.ControlDataFlowGraph()
+        bb2_1 = cdfg2.new_block()
+        n2_1 = cdfg2.new_node(nodes.Node, block=bb2_1)
+
+        bb1_1 = self.cdfg.new_block()
+        n1_1 = self.cdfg.new_node(nodes.Node, block=bb1_1)
+        n1_2 = self.cdfg.new_node(nodes.Node, block=bb1_1)
+        n1_3 = self.cdfg.new_node(nodes.Node, block=bb1_1)
+
+        self.cdfg.inline_call(n1_2, cdfg2)
+
+        bb1, bb2, bb3 = self.cdfg.blocks
+        self.assertIs(bb1, bb1_1)
+
+        self.assertIn(n1_1, self.cdfg.nodes)
+        self.assertIn(n1_3, self.cdfg.nodes)
+        self.assertNotIn(n1_2, self.cdfg.nodes)
+
+        _, n1, n2, n3, n4, n5 = self.cdfg.nodes
+
+        self.assertIs(n1.block, bb1)
+        self.assertIs(n2.block, bb1)
+        self.assertIs(n3.block, bb2)
+        self.assertIs(n4.block, bb2)
+        self.assertIs(n5.block, bb3)
+
+        self.assertIsInstance(n2, nodes.PreInlineNode)
+        self.assertIsInstance(n3, nodes.PostInlineNode)
+
+        self.assertCountEqual(n2.successors, [n5])
+        self.assertCountEqual(n5.successors, [n3])
+        self.assertCountEqual(n5.predecessors, [n2])
+        self.assertCountEqual(n3.predecessors, [n5])
+
+    def test_inline_link_parameters(self):
+        cdfg2 = nodes.ControlDataFlowGraph()
+        n2_1 = cdfg2.new_node(nodes.ParameterNode)
+        n2_2 = cdfg2.new_node(nodes.ParameterNode)
+        bb2_1 = cdfg2.new_block()
+        n2_3 = cdfg2.new_node(nodes.Node, block=bb2_1)
+        n2_4 = cdfg2.new_node(nodes.Node, block=bb2_1)
+
+        cdfg2.add_input(n2_3, n2_2)
+        cdfg2.add_input(n2_4, n2_1)
+
+        bb1_1 = self.cdfg.new_block()
+        n1_1 = self.cdfg.new_node(nodes.Node, block=bb1_1, id_="n1")
+        n1_2 = self.cdfg.new_node(nodes.Node, block=bb1_1, id_="n2")
+        n1_3 = self.cdfg.new_node(nodes.Node, block=bb1_1, id_="n3")
+        n1_4 = self.cdfg.new_node(nodes.Node, block=bb1_1, id_="n4")
+
+        self.cdfg.add_input(n1_3, n1_1)
+        self.cdfg.add_input(n1_3, n1_2)
+
+        self.cdfg.inline_call(n1_3, cdfg2)
+
+        bb1, bb2, bb3 = self.cdfg.blocks
+        self.assertIs(bb1, bb1_1)
+
+        self.assertIn(n1_1, self.cdfg.nodes)
+        self.assertIn(n1_2, self.cdfg.nodes)
+        self.assertNotIn(n1_3, self.cdfg.nodes)
+        self.assertIn(n1_4, self.cdfg.nodes)
+
+        _, n1, n2, n3, n4, n5, n6, n7 = self.cdfg.nodes
+
+        self.assertIs(n1.block, bb1)
+        self.assertIs(n2.block, bb1)
+        self.assertIs(n3.block, bb1)
+        self.assertIs(n4.block, bb2)
+        self.assertIs(n5.block, bb2)
+        self.assertIs(n6.block, bb3)
+        self.assertIs(n7.block, bb3)
+
+        self.assertIsInstance(n3, nodes.PreInlineNode)
+        self.assertIsInstance(n4, nodes.PostInlineNode)
+
+        self.assertCountEqual(n3.successors, [n6])
+        self.assertCountEqual(n6.successors, [n7])
+        self.assertCountEqual(n7.successors, [n4])
+        self.assertCountEqual(n6.predecessors, [n3])
+        self.assertCountEqual(n7.predecessors, [n6])
+        self.assertCountEqual(n4.predecessors, [n7])
+
+        self.assertCountEqual(n6.inputs, [n1_2])
+        self.assertCountEqual(n7.inputs, [n1_1])
+
+    def test_inline_link_return_values(self):
+        cdfg2 = nodes.ControlDataFlowGraph()
+        bb2_1 = cdfg2.new_block()
+        n2_1 = cdfg2.new_node(nodes.ASMNode, block=bb2_1, opcode=Opcode.IRETURN)
+        n2_2 = cdfg2.new_node(nodes.ASMNode, block=bb2_1, opcode=Opcode.IRETURN)
+
+        bb1_1 = self.cdfg.new_block()
+        n1_1 = self.cdfg.new_node(nodes.Node, block=bb1_1, id_="n1")
+        n1_2 = self.cdfg.new_node(nodes.Node, block=bb1_1, id_="n2")
+        n1_3 = self.cdfg.new_node(nodes.Node, block=bb1_1, id_="n3")
+
+        self.cdfg.add_input(n1_3, n1_2)
+
+        self.cdfg.inline_call(n1_2, cdfg2)
+
+        bb1, bb2, bb3 = self.cdfg.blocks
+        self.assertIs(bb1, bb1_1)
+
+        self.assertIn(n1_1, self.cdfg.nodes)
+        self.assertNotIn(n1_2, self.cdfg.nodes)
+        self.assertIn(n1_3, self.cdfg.nodes)
+
+        n1, n2, n3, n4, n5, n6, n7 = self.cdfg.nodes
+
+        self.assertIs(n1.block, None)
+        self.assertIs(n2.block, bb1)
+        self.assertIs(n3.block, bb1)
+        self.assertIs(n4.block, bb2)
+        self.assertIs(n5.block, bb2)
+        self.assertIs(n6.block, bb3)
+        self.assertIs(n7.block, bb3)
+
+        self.assertIsInstance(n1, nodes.MergeNode)
+        self.assertIsInstance(n3, nodes.PreInlineNode)
+        self.assertIsInstance(n4, nodes.PostInlineNode)
+
+        self.assertCountEqual(n3.successors, [n6])
+        self.assertCountEqual(n6.successors, [n7])
+        self.assertCountEqual(n7.successors, [n4])
+        self.assertCountEqual(n6.predecessors, [n3])
+        self.assertCountEqual(n7.predecessors, [n6])
+        self.assertCountEqual(n4.predecessors, [n7])
+
+        self.assertCountEqual(n1_3.inputs, [n1])
+        self.assertCountEqual(n1.inputs, [n6, n7])
+
 
 class Testload_asm(unittest.TestCase):
     def setUp(self):
@@ -498,6 +1146,7 @@ class Testload_asm(unittest.TestCase):
         tree = self.E(xmlutil.ASM.method)
 
         result = nodes.load_asm(tree)
+        result.assert_consistency()
 
         self.assertCountEqual(result.blocks, [])
         self.assertCountEqual(result.nodes, [])
@@ -517,6 +1166,7 @@ class Testload_asm(unittest.TestCase):
         )
 
         result = nodes.load_asm(tree)
+        result.assert_consistency()
 
         bb1, = result.blocks
         node, = result.nodes
@@ -561,6 +1211,7 @@ class Testload_asm(unittest.TestCase):
         )
 
         result = nodes.load_asm(tree)
+        result.assert_consistency()
 
         bb1, = result.blocks
         n1, n2, n3, = result.nodes
@@ -628,6 +1279,7 @@ class Testload_asm(unittest.TestCase):
         )
 
         result = nodes.load_asm(tree)
+        result.assert_consistency()
 
         n1 = result.node_by_id("java:test/1")
         n2 = result.node_by_id("java:test/2")
@@ -692,10 +1344,64 @@ class Testload_asm(unittest.TestCase):
         )
 
         result = nodes.load_asm(tree)
+        result.assert_consistency()
 
         n1, n2, n3 = result.nodes
 
         self.assertCountEqual(n3.inputs, [n1, n2])
+
+    def test_merge(self):
+        tree = self.E(
+            xmlutil.ASM.method,
+            self.E(
+                xmlutil.ASM.insns,
+                self.E(
+                    xmlutil.ASM.insn,
+                    id="java:test/1",
+                ),
+                self.E(
+                    xmlutil.ASM.insn,
+                    id="java:test/2",
+                ),
+                self.E(
+                    xmlutil.ASM.insn,
+                    self.E(
+                        xmlutil.ASM.inputs,
+                        self.E(
+                            xmlutil.ASM("merge"),
+                            self.E(
+                                xmlutil.ASM("value-of"),
+                                **{"from": "java:test/1"},
+                            ),
+                            self.E(
+                                xmlutil.ASM("value-of"),
+                                **{"from": "java:test/2"},
+                            ),
+                        ),
+                    ),
+                    id="java:test/3",
+                )
+            )
+        )
+
+        result = nodes.load_asm(tree)
+        result.assert_consistency()
+
+        n1, n2, n3, n4 = result.nodes
+
+        self.assertIsInstance(n1, nodes.MergeNode)
+
+        self.assertIsInstance(n2, nodes.ASMNode)
+        self.assertEqual(n2.unique_id, "java:test/1")
+
+        self.assertIsInstance(n3, nodes.ASMNode)
+        self.assertEqual(n3.unique_id, "java:test/2")
+
+        self.assertIsInstance(n4, nodes.ASMNode)
+        self.assertEqual(n4.unique_id, "java:test/3")
+
+        self.assertCountEqual(n1.inputs, [n2, n3])
+        self.assertCountEqual(n4.inputs, [n1])
 
     def test_parameter_nodes(self):
         tree = self.E(
@@ -705,17 +1411,18 @@ class Testload_asm(unittest.TestCase):
                 self.E(
                     xmlutil.ASM.parameter,
                     id="java:param/0",
-                    type_="java:I",
+                    type="java:I",
                 ),
                 self.E(
                     xmlutil.ASM.parameter,
                     id="java:param/1",
-                    type_="java:Lorg/foo;"
+                    type="java:Lorg/foo;"
                 ),
             )
         )
 
         result = nodes.load_asm(tree)
+        result.assert_consistency()
 
         n1, n2 = result.nodes
 
@@ -726,3 +1433,109 @@ class Testload_asm(unittest.TestCase):
         self.assertIsInstance(n2, nodes.ParameterNode)
         self.assertEqual(n2.type_, "java:Lorg/foo;")
         self.assertIsNone(n2.block)
+
+    def test_exception_node(self):
+        tree = self.E(
+            xmlutil.ASM.method,
+            self.E(
+                xmlutil.ASM.insns,
+                self.E(
+                    xmlutil.ASM.insn,
+                    self.E(
+                        xmlutil.ASM.inputs,
+                        self.E(
+                            xmlutil.ASM.exception,
+                            type="java:Ljava/lang/Exception;"
+                        ),
+                    ),
+                    id="java:test/3",
+                ),
+            )
+        )
+
+        result = nodes.load_asm(tree)
+        result.assert_consistency()
+
+        b1, = result.blocks
+        n1, n2 = result.nodes
+
+        self.assertIsInstance(n1, nodes.ExceptionNode)
+        self.assertEqual(n1.type_, "java:Ljava/lang/Exception;")
+        self.assertIsNone(n1.block)
+
+        self.assertIsInstance(n2, nodes.ASMNode)
+        self.assertIs(n2.block, b1)
+
+    def test_call_target(self):
+        tree = self.E(
+            xmlutil.ASM.method,
+            self.E(
+                xmlutil.ASM.insns,
+                self.E(
+                    xmlutil.ASM.insn,
+                    self.E(
+                        xmlutil.ASM("call-target"),
+                        target="target",
+                    ),
+                ),
+            )
+        )
+
+        result = nodes.load_asm(tree)
+        result.assert_consistency()
+
+        b1, = result.blocks
+        n1, = result.nodes
+
+        self.assertIsInstance(n1, nodes.ASMNode)
+        self.assertEqual(n1.call_target, "target")
+
+    def test_detaches_and_removes_placeholder_nodes(self):
+        tree = self.E(
+            xmlutil.ASM.method,
+            self.E(
+                xmlutil.ASM.insns,
+                self.E(
+                    xmlutil.ASM.insn,
+                    self.E(
+                        xmlutil.ASM.exits,
+                        self.E(
+                            xmlutil.ASM.exit,
+                            to="java:test/2",
+                        )
+                    ),
+                    id="java:test/1",
+                    opcode="1",
+                ),
+                self.E(
+                    xmlutil.ASM.insn,
+                    self.E(
+                        xmlutil.ASM.exits,
+                        self.E(
+                            xmlutil.ASM.exit,
+                            to="java:test/3",
+                        )
+                    ),
+                    id="java:test/2",
+                    opcode="-1",
+                ),
+                self.E(
+                    xmlutil.ASM.insn,
+                    id="java:test/3",
+                    opcode="2",
+                ),
+            )
+        )
+
+        result = nodes.load_asm(tree)
+        result.assert_consistency()
+
+        b1, = result.blocks
+        n1, n2 = result.nodes
+
+        self.assertEqual(n1.opcode, 1)
+        self.assertCountEqual(n1.successors, [n2])
+
+        self.assertEqual(n2.opcode, 2)
+        self.assertCountEqual(n2.predecessors, [n1])
+

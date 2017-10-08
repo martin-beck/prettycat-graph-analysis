@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import itertools
+import logging
 import typing
 
 import prettycdfg.nodes
@@ -104,11 +105,37 @@ def bb_graph_dot(args,
         print("}", file=f)
 
 
+def inline_calls(
+        cdfg: prettycdfg.nodes.ControlDataFlowGraph,
+        graphs: typing.Mapping[
+            str,
+            prettycdfg.nodes.ControlDataFlowGraph]):
+    while True:
+        for node in list(cdfg.nodes):
+            if not hasattr(node, "call_target") or node.call_target is None:
+                continue
+            call_target = node.call_target
+            try:
+                source_graph = graphs[call_target]
+            except KeyError:
+                logging.warning("cannot find source graph for method call %r",
+                                call_target)
+                continue
+            cdfg.inline_call(node, source_graph,
+                             inlined_id=call_target)
+            break
+        else:
+            break
+
+
 def cdfg_dot(args,
              graphs: typing.Mapping[
                  str,
                  prettycdfg.nodes.ControlDataFlowGraph]):
     cdfg = graphs[args.method]
+
+    if args.inline:
+        inline_calls(cdfg, graphs)
 
     if args.outfile is None:
         f = sys.stdout
@@ -135,7 +162,7 @@ def cdfg_dot(args,
             print(
                 '"{}" [label="{}"];'.format(
                     floating.unique_id,
-                    floating.unique_id,
+                    str(floating),
                 ),
                 file=f
             )
@@ -151,7 +178,7 @@ def cdfg_dot(args,
                 print(
                     '"{}" [label="{}"]'.format(
                         node.unique_id,
-                        node.local_id,
+                        str(node),
                     ),
                     file=f
                 )
@@ -204,6 +231,12 @@ def main():
     parser.add_argument(
         "graph",
         type=argparse.FileType("rb")
+    )
+    parser.add_argument(
+        "--inline",
+        action="store_true",
+        default=False,
+        help="Inline all the function calls",
     )
 
     subparsers = parser.add_subparsers()
