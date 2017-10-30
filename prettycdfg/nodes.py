@@ -129,6 +129,15 @@ class ASMNode(Node):
             parts.append("call_target={!r}".format(self._call_target))
         return "ASM:{}".format(";".join(parts))
 
+    def __repr__(self):
+        return "<{}.{} line={!r} opcode={!r} call_target{!r}>".format(
+            __name__,
+            type(self).__qualname__,
+            self._line,
+            self._opcode,
+            self._call_target,
+        )
+
 
 class MergeNode(Node):
     def __init__(self, unique_id):
@@ -529,9 +538,13 @@ class ControlDataFlowGraph:
         :return: The newly created block.
         :rtype: :class:`BasicBlock`
         """
-        block = self.new_block()
         old_block = at_node.block
         old_index = old_block._nodes.index(at_node)
+        if old_index == 0:
+            raise ValueError(
+                "cannot split a block at its first node"
+            )
+        block = self.new_block()
         block._nodes = old_block._nodes[old_index:]
         del old_block._nodes[old_index:]
 
@@ -673,17 +686,16 @@ class ControlDataFlowGraph:
                 "number of inputs and number of parameters mismatch"
             )
 
-        prev_block = call_node.block
-        next_block = self.split_block(call_node)
-
-        assert prev_block != next_block
-
         pre_inline = self.new_node(PreInlineNode,
-                                   inlined_id=inlined_id,
-                                   block=prev_block)
+                                   inlined_id=inlined_id)
+        self.move_node(pre_inline, call_node)
+
         post_inline = self.new_node(PostInlineNode,
                                     inlined_id=inlined_id)
         self.move_node(post_inline, call_node)
+
+        prev_block = post_inline.block
+        next_block = self.split_block(post_inline)
 
         new_nodes, new_blocks = self.merge(method_cdfg)
         nodemap = dict(zip(method_cdfg.nodes, new_nodes))
@@ -901,7 +913,10 @@ def load_asm(tree: lxml.etree.Element) -> ControlDataFlowGraph:
         if not isinstance(node, ASMNode):
             continue
         if node.opcode == -1:
-            result.detach_node(node)
-            result.remove_node(node)
+            try:
+                result.detach_node(node)
+                result.remove_node(node)
+            except ValueError:
+                pass
 
     return result

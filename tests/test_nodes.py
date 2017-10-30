@@ -667,6 +667,22 @@ class TestControlDataFlowGraph(unittest.TestCase):
         self.assertCountEqual(n2.predecessors, [n1])
         self.assertCountEqual(n3.predecessors, [n2])
 
+    def test_split_block_at_first_node(self):
+        bb1 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1)
+        n2 = self.cdfg.new_node(nodes.Node, block=bb1)
+        n3 = self.cdfg.new_node(nodes.Node, block=bb1)
+
+        with self.assertRaisesRegex(
+                ValueError,
+                r"cannot split a block at its first node"):
+            self.cdfg.split_block(n1)
+
+        self.assertSequenceEqual(list(self.cdfg.blocks), [bb1])
+
+        self.assertSequenceEqual(list(bb1.nodes), [n1, n2, n3])
+
     def test_add_input_both_floating(self):
         n1 = self.cdfg.new_node(nodes.Node)
         n2 = self.cdfg.new_node(nodes.Node)
@@ -1133,6 +1149,49 @@ class TestControlDataFlowGraph(unittest.TestCase):
 
         self.assertCountEqual(n1_3.inputs, [n1])
         self.assertCountEqual(n1.inputs, [n6, n7])
+
+    def test_inline_at_head_of_block(self):
+        cdfg2 = nodes.ControlDataFlowGraph()
+        bb2_1 = cdfg2.new_block()
+        n2_1 = cdfg2.new_node(nodes.ASMNode, block=bb2_1, opcode=Opcode.IRETURN)
+        n2_2 = cdfg2.new_node(nodes.ASMNode, block=bb2_1, opcode=Opcode.IRETURN)
+
+        bb1_1 = self.cdfg.new_block()
+        n1_1 = self.cdfg.new_node(nodes.Node, block=bb1_1, id_="n1")
+        n1_2 = self.cdfg.new_node(nodes.Node, block=bb1_1, id_="n2")
+
+        self.cdfg.add_input(n1_2, n1_1)
+
+        self.cdfg.inline_call(n1_1, cdfg2)
+
+        bb1, bb2, bb3 = self.cdfg.blocks
+        self.assertIs(bb1, bb1_1)
+
+        self.assertNotIn(n1_1, self.cdfg.nodes)
+        self.assertIn(n1_2, self.cdfg.nodes)
+
+        n1, n2, n3, n4, n5, n6 = self.cdfg.nodes
+
+        self.assertIs(n1.block, None)
+        self.assertIs(n2.block, bb1)
+        self.assertIs(n3.block, bb2)
+        self.assertIs(n4.block, bb2)
+        self.assertIs(n5.block, bb3)
+        self.assertIs(n6.block, bb3)
+
+        self.assertIsInstance(n1, nodes.MergeNode)
+        self.assertIsInstance(n2, nodes.PreInlineNode)
+        self.assertIsInstance(n3, nodes.PostInlineNode)
+
+        self.assertCountEqual(n2.successors, [n5])
+        self.assertCountEqual(n5.successors, [n6])
+        self.assertCountEqual(n6.successors, [n3])
+        self.assertCountEqual(n5.predecessors, [n2])
+        self.assertCountEqual(n6.predecessors, [n5])
+        self.assertCountEqual(n3.predecessors, [n6])
+
+        self.assertCountEqual(n1_2.inputs, [n1])
+        self.assertCountEqual(n1.inputs, [n5, n6])
 
 
 class Testload_asm(unittest.TestCase):
