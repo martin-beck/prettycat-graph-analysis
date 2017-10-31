@@ -1,5 +1,6 @@
 import abc
 import copy
+import enum
 import itertools
 import uuid
 import typing
@@ -8,6 +9,11 @@ import lxml.etree
 
 from .opcodes import Opcode
 from .xmlutil import ASM
+
+
+class EdgeType(enum.Enum):
+    DATA_FLOW = 'data'
+    CONTROL_FLOW = 'control'
 
 
 class AbstractNode:
@@ -33,9 +39,10 @@ class AbstractNode:
 class Node(AbstractNode):
     def __init__(self, unique_id):
         super().__init__(unique_id)
-        self._inputs = []
-        self._predecessors = []
-        self._successors = []
+        self._cf_in = []
+        self._cf_out = []
+        self._df_in = []
+        self._df_out = []
         self._block = None
 
     @property
@@ -47,15 +54,15 @@ class Node(AbstractNode):
         """
         A list of unique IDs of input nodes.
         """
-        return iter(self._inputs)
+        return (edge.from_ for edge in self._df_in)
 
     @property
     def successors(self) -> typing.Iterable['Node']:
-        return iter(self._successors)
+        return (edge.to for edge in self._cf_out)
 
     @property
     def predecessors(self) -> typing.Iterable['Node']:
-        return iter(self._predecessors)
+        return (edge.from_ for edge in self._cf_in)
 
     @property
     def block(self) -> 'BasicBlock':
@@ -64,9 +71,10 @@ class Node(AbstractNode):
     def __copy__(self):
         result = type(self).__new__(type(self))
         result.__dict__.update(self.__dict__.copy())
-        result._inputs = []
-        result._predecessors = []
-        result._successors = []
+        result._cf_in = []
+        result._cf_out = []
+        result._df_in = []
+        result._df_out = []
         result._block = None
         result._unique_id = None
         return result
@@ -207,6 +215,62 @@ class PostInlineNode(InlineNode):
         )
 
 
+class AbstractEdge:
+    def __init__(self, type_: EdgeType,
+                 from_: AbstractNode,
+                 to: AbstractNode, **kwargs):
+        super().__init__(**kwargs)
+        self._type = type_
+        self._from = from_
+        self._to = to
+
+    @property
+    def type_(self) -> EdgeType:
+        return self._type
+
+    @property
+    def from_(self) -> AbstractNode:
+        return self._from
+
+    @property
+    def to(self) -> AbstractNode:
+        return self._to
+
+    def rebind(self, *,
+               to: AbstractNode = None,
+               from_: AbstractNode = None) -> "AbstractEdge":
+        new_instance = copy.copy(self)
+        if to is not None:
+            new_instance._to = to
+        if from_ is not None:
+            new_instance._from = from_
+        return new_instance
+
+    def __repr__(self):
+        return "<{}.{} {!r} to {!r}>".format(
+            type(self).__module__,
+            type(self).__qualname__,
+            self._from,
+            self._to,
+        )
+
+
+class DataFlowEdge(AbstractEdge):
+    def __init__(self, from_: AbstractNode, to: AbstractNode, **kwargs):
+        super().__init__(EdgeType.DATA_FLOW, from_, to, **kwargs)
+
+
+class ControlFlowEdge(AbstractEdge):
+    def __init__(self, from_: AbstractNode, to: AbstractNode, *,
+                 is_exceptional: bool = False, **kwargs):
+        super().__init__(EdgeType.CONTROL_FLOW, from_, to)
+        self._is_exceptional = is_exceptional
+
+    @property
+    def is_exceptional(self) -> bool:
+        return self._is_exceptional
+
+
 def node_from_xml(tree):
     if tree.tag == IrGraph.node:
         return Node(tree.get("id"))
@@ -260,6 +324,37 @@ class ControlDataFlowGraph:
                     assert node._predecessors == [prev_node]
                 assert node._block is block, (node, block)
 
+        seen_in_edges = set()
+        seen_out_edges = set()
+
+        def check_in_edges(node, type_):
+            for in_edge in getattr(node, "_{}_in".format(type_)):
+                assert in_edge not in seen_in_edges, \
+                    "in_edge referenced by multiple nodes"
+                seen_in_edges.add(in_edge)
+                assert in_edge.to is node, \
+                    "holder of in_edge is not the actual destination"
+                assert in_edge in getattr(
+                    in_edge.from_, "_{}_out".format(type_)), \
+                    "in_edge not held by origin"
+
+        def check_out_edges(node, type_):
+            for out_edge in getattr(node, "_{}_out".format(type_)):
+                assert out_edge not in seen_out_edges, \
+                    "out_edge referenced by multiple nodes"
+                seen_out_edges.add(out_edge)
+                assert out_edge.from_ is node, \
+                    "holder of out_edge is not the actual origin"
+                assert out_edge in getattr(
+                    out_edge.to, "_{}_in".format(type_)), \
+                    "out_edge not held by destination"
+
+        for node in self.nodes:
+            check_in_edges(node, "cf")
+            check_in_edges(node, "df")
+            check_out_edges(node, "cf")
+            check_out_edges(node, "df")
+
     @property
     def blocks(self) -> typing.Iterable[BasicBlock]:
         return iter(self._blocks)
@@ -303,7 +398,7 @@ class ControlDataFlowGraph:
         """
         return (
             block for block in self._blocks
-            if block._nodes and not block._nodes[0]._predecessors
+            if block._nodes and not block._nodes[0]._cf_in
         )
 
     @property
@@ -313,7 +408,7 @@ class ControlDataFlowGraph:
         """
         return (
             block for block in self._blocks
-            if block._nodes and not block._nodes[-1]._successors
+            if block._nodes and not block._nodes[-1]._cf_out
         )
 
     def block_by_node(self, node: Node) -> BasicBlock:
@@ -369,12 +464,17 @@ class ControlDataFlowGraph:
         if block:
             if block._nodes:
                 old_last = block._nodes[-1]
-                node._predecessors[:] = [old_last]
-                node._successors[:] = old_last._successors
-                old_last._successors[:] = [node]
-                for successor in node._successors:
-                    successor._predecessors.remove(old_last)
-                    successor._predecessors.append(node)
+                in_edge = ControlFlowEdge(old_last, node)
+                for old_out_edge in old_last._cf_out:
+                    new_out_edge = old_out_edge.rebind(
+                        from_=node,
+                    )
+                    node._cf_out.append(new_out_edge)
+                    old_out_edge.to._cf_in[
+                        old_out_edge.to._cf_in.index(old_out_edge)
+                    ] = new_out_edge
+                node._cf_in.append(in_edge)
+                old_last._cf_out[:] = [in_edge]
             block._nodes.append(node)
         else:
             self._floating_nodes.append(node)
@@ -390,20 +490,20 @@ class ControlDataFlowGraph:
         :raises ValueError: if `node` has multiple successors bot not exactly
             one predecessor.
         """
-        new_predecessors = list(insert_before.predecessors)
-        new_successors = [insert_before]
+        before_edges = list(insert_before._cf_in)
 
         if node.block is not None:
             self.detach_node(node)
 
         # now we patch the destination links
 
-        for predecessor in insert_before.predecessors:
-            old_succ_idx = predecessor._successors.index(insert_before)
-            predecessor._successors[old_succ_idx] = node
-
-        node._predecessors[:] = new_predecessors
-        node._successors[:] = new_successors
+        for in_edge in insert_before._cf_in:
+            new_edge = in_edge.rebind(to=node)
+            node._cf_in.append(new_edge)
+            in_edge.to._cf_in.remove(in_edge)
+            in_edge.from_._cf_out[in_edge.from_._cf_out.index(in_edge)] = \
+                new_edge
+        insert_before._cf_in.clear()
         self._floating_nodes.remove(node)
         node._block = insert_before._block
         insert_before._block._nodes.insert(
@@ -411,7 +511,9 @@ class ControlDataFlowGraph:
             node,
         )
 
-        insert_before._predecessors[:] = [node]
+        new_edge = ControlFlowEdge(node, insert_before)
+        node._cf_out.append(new_edge)
+        insert_before._cf_in.append(new_edge)
 
     def detach_node(self, node: Node):
         """
@@ -429,30 +531,52 @@ class ControlDataFlowGraph:
         if node.block is None:
             raise ValueError("cannot detach floating node")
 
-        old_successors = list(node._successors)
-        old_predecessors = list(node._predecessors)
+        old_outbound = list(node._cf_out)
+        old_inbound = list(node._cf_in)
 
-        if len(old_predecessors) > 1 and len(old_successors) > 1:
+        if len(old_inbound) > 1 and len(old_outbound) > 1:
             raise ValueError("cannot detach node with multiple predecessors "
                              "and multiple successors")
 
         # we first patch the old links
 
-        for successor in old_successors:
-            successor._predecessors.remove(node)
-            successor._predecessors.extend(old_predecessors)
+        new_edges = [
+            (in_edge, out_edge, in_edge.rebind(to=out_edge.to))
+            for in_edge in old_inbound
+            for out_edge in old_outbound
+        ]
 
-        for predecessor in old_predecessors:
-            predecessor._successors.remove(node)
-            predecessor._successors.extend(old_successors)
+        out_edge_map = {
+            (out_edge, in_edge.from_): new_edge
+            for in_edge, out_edge, new_edge in new_edges
+        }
 
-        node._successors.clear()
-        node._predecessors.clear()
+        in_edge_map = {
+            (in_edge, out_edge.to): new_edge
+            for in_edge, out_edge, new_edge in new_edges
+        }
+
+        for out_edge in old_outbound:
+            out_edge.to._cf_in.remove(out_edge)
+            out_edge.to._cf_in.extend(
+                in_edge_map[in_edge, out_edge.to]
+                for in_edge in old_inbound
+            )
+
+        for in_edge in old_inbound:
+            in_edge.from_._cf_out.remove(in_edge)
+            in_edge.from_._cf_out.extend(
+                out_edge_map[out_edge, in_edge.from_]
+                for out_edge in old_outbound
+            )
+
+        node._cf_in.clear()
+        node._cf_out.clear()
         node._block._nodes.remove(node)
         self._floating_nodes.append(node)
         node._block = None
 
-    def add_successor(self, at: Node, successor: Node):
+    def add_successor(self, at: Node, successor: Node, **kwargs):
         """
         Add a control flow successor to a node.
 
@@ -490,8 +614,9 @@ class ControlDataFlowGraph:
                 "cannot add non-first node as successor"
             )
 
-        at._successors.append(successor)
-        successor._predecessors.append(at)
+        new_edge = ControlFlowEdge(at, successor, **kwargs)
+        at._cf_out.append(new_edge)
+        successor._cf_in.append(new_edge)
 
     def remove_successor(self, at: Node, successor: Node):
         """
@@ -505,16 +630,19 @@ class ControlDataFlowGraph:
                 "instead"
             )
 
-        try:
-            at._successors.remove(successor)
-        except ValueError:
+        for i, out_edge in enumerate(at._cf_out):
+            if out_edge.to is successor:
+                break
+        else:
             raise ValueError(
                 "{!r} is not a successor of {!r}".format(
                     successor,
                     at,
                 )
             ) from None
-        successor._predecessors.remove(at)
+
+        del at._cf_out[i]
+        successor._cf_in.remove(out_edge)
 
     def add_input(self, at: Node, source: Node):
         """
@@ -524,7 +652,9 @@ class ControlDataFlowGraph:
 
             This does not check that the data flow graph is still valid.
         """
-        at._inputs.append(source)
+        edge = DataFlowEdge(source, at)
+        source._df_out.append(edge)
+        at._df_in.append(edge)
 
     def split_block(self, at_node: Node) -> BasicBlock:
         """
@@ -580,9 +710,9 @@ class ControlDataFlowGraph:
         """
         if b2 not in b1.exits and b2._nodes and b1._nodes:
             raise ValueError("b2 is not a successor of b1")
-        if b1._nodes and len(b1._nodes[-1]._successors) > 1:
+        if b1._nodes and len(b1._nodes[-1]._cf_out) > 1:
             raise ValueError("b1 has multiple successors")
-        if b2._nodes and len(b2._nodes[0]._predecessors) > 1:
+        if b2._nodes and len(b2._nodes[0]._cf_in) > 1:
             raise ValueError("b2 has multiple predecessors")
         b1._nodes.extend(b2._nodes)
         for node in b2._nodes:
@@ -615,9 +745,10 @@ class ControlDataFlowGraph:
         for old_node in other_cdfg.nodes:
             block = blockmap[old_node.block]
             new_node = copy.copy(old_node)
-            new_node._inputs.clear()
-            new_node._successors.clear()
-            new_node._predecessors.clear()
+            new_node._cf_in.clear()
+            new_node._df_in.clear()
+            new_node._cf_out.clear()
+            new_node._df_out.clear()
 
             def fake_new_node(unique_id):
                 new_node._unique_id = unique_id
@@ -625,21 +756,31 @@ class ControlDataFlowGraph:
 
             nodemap[old_node] = self.new_node(fake_new_node, block=block)
 
-            for successor in old_node.successors:
-                if successor.block == old_node.block:
+            for out_edge in old_node._cf_out:
+                if out_edge.to.block == old_node.block:
                     continue
-                control_flow.append((old_node, successor))
+                control_flow.append(out_edge)
 
-            for input_ in old_node.inputs:
-                data_flow.append((old_node, input_))
+            for in_edge in old_node._df_in:
+                data_flow.append(in_edge)
 
             new_nodes.append(new_node)
 
-        for from_, to in control_flow:
-            self.add_successor(nodemap[from_], nodemap[to])
+        for out_edge in control_flow:
+            new_edge = out_edge.rebind(
+                from_=nodemap[out_edge.from_],
+                to=nodemap[out_edge.to],
+            )
+            new_edge.from_._cf_out.append(new_edge)
+            new_edge.to._cf_in.append(new_edge)
 
-        for to, from_ in data_flow:
-            self.add_input(nodemap[to], nodemap[from_])
+        for in_edge in data_flow:
+            new_edge = in_edge.rebind(
+                from_=nodemap[in_edge.from_],
+                to=nodemap[in_edge.to],
+            )
+            new_edge.from_._df_out.append(new_edge)
+            new_edge.to._df_in.append(new_edge)
 
         return new_nodes, new_blocks
 
@@ -680,7 +821,7 @@ class ControlDataFlowGraph:
                 "cannot inline graph with no tails"
             )
 
-        inputs = list(call_node._inputs)
+        inputs = list(call_node._df_in)
         if len(inputs) != len(list(method_cdfg.parameters)):
             raise ValueError(
                 "number of inputs and number of parameters mismatch"
@@ -712,18 +853,22 @@ class ControlDataFlowGraph:
         ]
 
         parametermap = {
-            param_node: input_
-            for param_node, input_ in zip(parameters, inputs)
+            param_node: in_edge
+            for param_node, in_edge in zip(parameters, inputs)
         }
 
         for node in nodemap.values():
-            for i, input_ in enumerate(list(node._inputs)):
+            for i, in_edge in enumerate(list(node._df_in)):
                 try:
-                    replacement = parametermap[input_]
+                    replacement = parametermap[in_edge.from_]
                 except KeyError:
                     continue
-                else:
-                    node._inputs[i] = replacement
+                # the old edge will be deleted by remove_node(parameter) later
+                new_edge = in_edge.rebind(
+                    from_=replacement.from_,
+                )
+                new_edge.from_._df_out.append(new_edge)
+                node._df_in.append(new_edge)
 
         for parameter in parameters:
             self.remove_node(parameter)
@@ -734,16 +879,18 @@ class ControlDataFlowGraph:
         ]
         if len(returns) != 1:
             return_value_node = self.new_node(MergeNode)
-            return_value_node._inputs[:] = returns
+            for return_node in returns:
+                self.add_input(return_value_node, return_node)
         else:
             return_value_node, = returns
 
-        for node in self.nodes:
-            try:
-                index = node._inputs.index(call_node)
-            except ValueError:
-                continue
-            node._inputs[index] = return_value_node
+        for out_edge in call_node._df_out:
+            new_edge = out_edge.rebind(from_=return_value_node)
+            out_edge.to._df_in[out_edge.to._df_in.index(out_edge)] = \
+                new_edge
+            new_edge.from_._df_out.append(new_edge)
+
+        call_node._df_out.clear()
 
         self.remove_node(call_node)
 
@@ -759,10 +906,10 @@ class ControlDataFlowGraph:
                 if not bb._nodes:
                     continue
                 last = bb._nodes[-1]
-                if len(last._successors) != 1:
+                if len(last._cf_out) != 1:
                     continue
-                dest = last._successors[0].block
-                if len(dest._nodes[0]._predecessors) != 1:
+                dest = last._cf_out[0].to.block
+                if len(dest._nodes[0]._cf_in) != 1:
                     continue
                 self.join_blocks(bb, dest)
                 break
@@ -775,32 +922,17 @@ class ControlDataFlowGraph:
 
         :param node: The node to remove.
         :type node: :class:`Node`
-
-        Only freestanding nodes can be removed from the CDFG. Freestanding nodes
-        are nodes which:
-
-        * are not an input to another node
         """
         block = node._block
         if block is not None:
-            new_successors = list(node.successors)
-            new_predecessors = list(node.predecessors)
-            for predecessor in node.predecessors:
-                predecessor._successors[:] = new_successors
-            for successor in node.successors:
-                successor._predecessors[:] = new_predecessors
-            node._successors.clear()
-            node._predecessors.clear()
-            node._block = None
-            block._nodes.remove(node)
-        else:
-            self._floating_nodes.remove(node)
-        node._inputs.clear()
-        for other_node in self.nodes:
-            try:
-                other_node._inputs.remove(node)
-            except ValueError:  # not in inputs
-                pass
+            self.detach_node(node)
+        self._floating_nodes.remove(node)
+        for in_edge in node._df_in:
+            in_edge.from_._df_out.remove(in_edge)
+        for out_edge in node._df_out:
+            out_edge.to._df_in.remove(out_edge)
+        node._df_in.clear()
+        node._df_out.clear()
 
 
 def _load_param_nodes(cdfg: ControlDataFlowGraph,

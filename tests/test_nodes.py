@@ -115,6 +115,10 @@ class TestControlDataFlowGraph(unittest.TestCase):
 
         with contextlib.ExitStack() as stack:
             constructor = unittest.mock.Mock()
+            constructor.return_value._cf_out = []
+            constructor.return_value._cf_in = []
+            constructor.return_value._df_out = []
+            constructor.return_value._df_in = []
 
             uuid4 = stack.enter_context(unittest.mock.patch("uuid.uuid4"))
             uuid4.return_value = 3
@@ -136,6 +140,10 @@ class TestControlDataFlowGraph(unittest.TestCase):
 
         with contextlib.ExitStack() as stack:
             constructor = unittest.mock.Mock()
+            constructor.return_value._cf_out = []
+            constructor.return_value._cf_in = []
+            constructor.return_value._df_out = []
+            constructor.return_value._df_in = []
 
             uuid4 = stack.enter_context(unittest.mock.patch("uuid.uuid4"))
             uuid4.return_value = 3
@@ -1101,8 +1109,8 @@ class TestControlDataFlowGraph(unittest.TestCase):
         self.assertCountEqual(n7.predecessors, [n6])
         self.assertCountEqual(n4.predecessors, [n7])
 
-        self.assertCountEqual(n6.inputs, [n1_2])
-        self.assertCountEqual(n7.inputs, [n1_1])
+        self.assertCountEqual(n6.inputs, [n1_2], n6)
+        self.assertCountEqual(n7.inputs, [n1_1], n7)
 
     def test_inline_link_return_values(self):
         cdfg2 = nodes.ControlDataFlowGraph()
