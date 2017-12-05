@@ -133,6 +133,8 @@ class TestControlDataFlowGraph(unittest.TestCase):
         self.assertCountEqual(self.cdfg.nodes, [node])
         self.assertCountEqual(self.cdfg.floating_nodes, [node])
 
+        node.unique_id = "urn:uuid:3"
+
     def test_new_node_with_block(self):
         bb = self.cdfg.new_block()
 
@@ -158,6 +160,8 @@ class TestControlDataFlowGraph(unittest.TestCase):
         self.assertCountEqual(self.cdfg.nodes, [node])
         self.assertCountEqual(bb.nodes, [node])
         self.assertCountEqual(self.cdfg.floating_nodes, [])
+
+        node.unique_id = "urn:uuid:3"
 
     def test_new_node_with_block_with_successors(self):
         bb1 = self.cdfg.new_block()
@@ -1201,6 +1205,152 @@ class TestControlDataFlowGraph(unittest.TestCase):
         self.assertCountEqual(n1_2.inputs, [n1])
         self.assertCountEqual(n1.inputs, [n5, n6])
 
+    def test_remove_empty_bb(self):
+        bb1 = self.cdfg.new_block()
+
+        self.cdfg.remove_block(bb1)
+
+        self.assertCountEqual(self.cdfg.blocks, [])
+
+    def test_remove_bb_with_nodes(self):
+        bb1 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, block=bb1)
+        n2 = self.cdfg.new_node(nodes.Node, block=bb1)
+        n3 = self.cdfg.new_node(nodes.Node, block=bb1)
+
+        self.cdfg.remove_block(bb1)
+
+        self.assertCountEqual(self.cdfg.blocks, [])
+        self.assertCountEqual(self.cdfg.nodes, [])
+
+    def test_remove_bb_cuts_inbound_cf_edges(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, id_="n1", block=bb1)
+        n2 = self.cdfg.new_node(nodes.Node, id_="n2", block=bb2)
+
+        self.cdfg.add_successor(n1, n2)
+
+        self.cdfg.remove_block(bb2)
+
+        self.assertCountEqual(self.cdfg.blocks, [bb1])
+        self.assertCountEqual(self.cdfg.nodes, [n1])
+
+        self.assertCountEqual(n1.successors, [])
+        self.assertCountEqual(n2.predecessors, [])
+
+    def test_remove_bb_cuts_outbound_cf_edges(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, id_="n1", block=bb1)
+        n2 = self.cdfg.new_node(nodes.Node, id_="n2", block=bb2)
+
+        self.cdfg.add_successor(n1, n2)
+
+        self.cdfg.remove_block(bb1)
+
+        self.assertCountEqual(self.cdfg.blocks, [bb2])
+        self.assertCountEqual(self.cdfg.nodes, [n2])
+
+        self.assertCountEqual(n1.successors, [])
+        self.assertCountEqual(n2.predecessors, [])
+
+    def test_remove_bb_cuts_outbound_df_edges(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, id_="n1", block=bb1)
+        n2 = self.cdfg.new_node(nodes.Node, id_="n2", block=bb1)
+        n3 = self.cdfg.new_node(nodes.Node, id_="n3", block=bb1)
+        n4 = self.cdfg.new_node(nodes.Node, id_="n4", block=bb2)
+
+        self.cdfg.add_successor(n3, n4)
+        self.cdfg.add_input(n4, n2)
+
+        self.assertCountEqual(n4.inputs, [n2])
+
+        self.cdfg.remove_block(bb1)
+
+        self.assertCountEqual(n4.inputs, [])
+
+    def test_remove_bb_cuts_inbound_df_edges(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, id_="n1", block=bb1)
+        n2 = self.cdfg.new_node(nodes.Node, id_="n2", block=bb2)
+        n3 = self.cdfg.new_node(nodes.Node, id_="n3", block=bb2)
+        n4 = self.cdfg.new_node(nodes.Node, id_="n4", block=bb2)
+
+        self.cdfg.add_successor(n1, n2)
+        self.cdfg.add_input(n3, n1)
+
+        self.assertCountEqual(n3.inputs, [n1])
+
+        self.cdfg.remove_block(bb2)
+
+        self.assertCountEqual(n3.inputs, [])
+
+    def test_strip_exceptional_removes_control_flow_edges(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+        bb3 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, id_="n1", block=bb1)
+        n2 = self.cdfg.new_node(nodes.Node, id_="n2", block=bb2)
+        n3 = self.cdfg.new_node(nodes.Node, id_="n3", block=bb3)
+
+        self.cdfg.add_successor(n1, n3, is_exceptional=True)
+        self.cdfg.add_successor(n2, n3, is_exceptional=False)
+
+        self.cdfg.strip_exceptional()
+
+        self.assertCountEqual(n1.successors, [])
+        self.assertCountEqual(n3.predecessors, [n2])
+
+    def test_strip_exceptional_removes_orphaned_basic_blocks(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+        bb3 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, id_="n1", block=bb1)
+        n2 = self.cdfg.new_node(nodes.Node, id_="n2", block=bb2)
+        n3 = self.cdfg.new_node(nodes.Node, id_="n3", block=bb3)
+
+        self.cdfg.add_successor(n1, n3, is_exceptional=True)
+        self.cdfg.add_successor(n1, n2)
+
+        self.cdfg.strip_exceptional()
+
+        self.assertNotIn(bb3, self.cdfg.blocks)
+        self.assertCountEqual(n1.successors, [n2])
+
+    def test_strip_exceptional_removes_orphaned_basic_blocks_recursively(self):
+        bb1 = self.cdfg.new_block()
+        bb2 = self.cdfg.new_block()
+        bb3 = self.cdfg.new_block()
+        bb4 = self.cdfg.new_block()
+
+        n1 = self.cdfg.new_node(nodes.Node, id_="n1", block=bb1)
+        n2 = self.cdfg.new_node(nodes.Node, id_="n2", block=bb2)
+        n3 = self.cdfg.new_node(nodes.Node, id_="n3", block=bb3)
+        n4 = self.cdfg.new_node(nodes.Node, id_="n4", block=bb4)
+
+        self.cdfg.add_successor(n1, n2, is_exceptional=True)
+        self.cdfg.add_successor(n2, n3)
+        self.cdfg.add_successor(n3, n4)
+        self.cdfg.add_successor(n1, n4)
+
+        self.cdfg.strip_exceptional()
+
+        self.assertNotIn(bb2, self.cdfg.blocks)
+        self.assertNotIn(bb3, self.cdfg.blocks)
+        self.assertCountEqual(n1.successors, [n4])
+        self.assertCountEqual(n4.predecessors, [n1])
+
 
 class Testload_asm(unittest.TestCase):
     def setUp(self):
@@ -1361,6 +1511,104 @@ class Testload_asm(unittest.TestCase):
 
         self.assertCountEqual(n1.predecessors, [])
         self.assertCountEqual(n1.successors, [n2, n3])
+
+        self.assertCountEqual(n2.predecessors, [n1])
+        self.assertCountEqual(n2.successors, [n4])
+
+        self.assertCountEqual(n3.predecessors, [n1])
+        self.assertCountEqual(n3.successors, [n4])
+
+        self.assertCountEqual(n4.predecessors, [n2, n3])
+        self.assertCountEqual(n4.successors, [n5])
+
+        self.assertCountEqual(n5.predecessors, [n4])
+        self.assertCountEqual(n5.successors, [])
+
+        self.assertCountEqual(bb1.nodes, [n1])
+        self.assertCountEqual(bb2.nodes, [n2])
+        self.assertCountEqual(bb3.nodes, [n3])
+        self.assertCountEqual(bb4.nodes, [n4, n5])
+
+    def test_multi_bb_exceptional(self):
+        tree = self.E(
+            xmlutil.ASM.method,
+            self.E(
+                xmlutil.ASM.insns,
+                self.E(
+                    xmlutil.ASM.insn,
+                    self.E(
+                        xmlutil.ASM.exits,
+                        self.E(
+                            xmlutil.ASM.exit,
+                            to="java:test/2",
+                        ),
+                        self.E(
+                            xmlutil.ASM.exit,
+                            to="java:test/3",
+                            exceptional="true",
+                        )
+                    ),
+                    id="java:test/1",
+                ),
+                self.E(
+                    xmlutil.ASM.insn,
+                    self.E(
+                        xmlutil.ASM.exits,
+                        self.E(
+                            xmlutil.ASM.exit,
+                            to="java:test/4",
+                        )
+                    ),
+                    id="java:test/2",
+                ),
+                self.E(
+                    xmlutil.ASM.insn,
+                    self.E(
+                        xmlutil.ASM.exits,
+                        self.E(
+                            xmlutil.ASM.exit,
+                            to="java:test/4",
+                        )
+                    ),
+                    id="java:test/3",
+                ),
+                self.E(
+                    xmlutil.ASM.insn,
+                    self.E(
+                        xmlutil.ASM.exits,
+                        self.E(
+                            xmlutil.ASM.exit,
+                            to="java:test/5",
+                        )
+                    ),
+                    id="java:test/4",
+                ),
+                self.E(
+                    xmlutil.ASM.insn,
+                    id="java:test/5",
+                ),
+            )
+        )
+
+        result = nodes.load_asm(tree)
+        result.assert_consistency()
+
+        n1 = result.node_by_id("java:test/1")
+        n2 = result.node_by_id("java:test/2")
+        n3 = result.node_by_id("java:test/3")
+        n4 = result.node_by_id("java:test/4")
+        n5 = result.node_by_id("java:test/5")
+
+        bb1 = result.block_by_node(n1)
+        bb2 = result.block_by_node(n2)
+        bb3 = result.block_by_node(n3)
+        bb4 = result.block_by_node(n4)
+
+        self.assertCountEqual(n1.predecessors, [])
+        self.assertCountEqual(n1.successors, [n2, n3])
+
+        self.assertFalse(n1.cf_out[0].is_exceptional)
+        self.assertTrue(n1.cf_out[1].is_exceptional)
 
         self.assertCountEqual(n2.predecessors, [n1])
         self.assertCountEqual(n2.successors, [n4])

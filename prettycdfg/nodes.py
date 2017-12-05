@@ -1,7 +1,10 @@
 import abc
+import ast
+import base64
 import copy
 import enum
 import itertools
+import logging
 import uuid
 import typing
 
@@ -9,6 +12,9 @@ import lxml.etree
 
 from .opcodes import Opcode
 from .xmlutil import ASM
+
+
+logger = logging.getLogger(__name__)
 
 
 class EdgeType(enum.Enum):
@@ -34,6 +40,15 @@ class AbstractNode:
             type(self).__qualname__,
             self._unique_id,
         )
+
+    @abc.abstractclassmethod
+    def _create_element(self) -> lxml.etree.Element:
+        pass
+
+    def to_xml(self) -> lxml.etree.Element:
+        el = self._create_element()
+        el.set("id", self._unique_id)
+        return el
 
 
 class Node(AbstractNode):
@@ -68,6 +83,10 @@ class Node(AbstractNode):
     def block(self) -> 'BasicBlock':
         return self._block
 
+    @property
+    def cf_out(self) -> typing.Sequence['ControlFlowEdge']:
+        return self._cf_out
+
     def __copy__(self):
         result = type(self).__new__(type(self))
         result.__dict__.update(self.__dict__.copy())
@@ -77,6 +96,14 @@ class Node(AbstractNode):
         result._df_out = []
         result._block = None
         result._unique_id = None
+        return result
+
+    def __deepcopy__(self, memo):
+        # print(self.__dict__)
+        dup = copy.deepcopy(self.__dict__, memo)
+        # print(dup)
+        result = type(self).__new__(type(self))
+        result.__dict__.update(dup)
         return result
 
     def __str__(self):
@@ -93,6 +120,21 @@ class Node(AbstractNode):
     def is_parameter(self) -> bool:
         return False
 
+    def to_xml(self):
+        el = super().to_xml()
+        if self._df_in:
+            inputs = lxml.etree.SubElement(el, ASM.inputs)
+            for edge in self._df_in:
+                input_el = lxml.etree.SubElement(inputs, ASM("value-of"))
+                input_el.set("from", edge.from_.unique_id)
+        if self._cf_out:
+            exits = lxml.etree.SubElement(el, ASM.exits)
+            for edge in self._cf_out:
+                exit_el = lxml.etree.SubElement(exits, ASM.exit)
+                exit_el.set("to", edge.to.unique_id)
+                exit_el.set("exceptional", "true" if edge.is_exceptional else "false")
+        return el
+
 
 class ASMNode(Node):
     RETURN_OPCODES = [Opcode.IRETURN, Opcode.ARETURN, Opcode.LRETURN,
@@ -101,11 +143,17 @@ class ASMNode(Node):
     def __init__(self, unique_id,
                  line: typing.Optional[int] = None,
                  opcode: typing.Optional[int] = None,
-                 call_target: typing.Optional[str] = None):
+                 call_target: typing.Optional[str] = None,
+                 const=None,
+                 field_name: typing.Optional[str] = None,
+                 field_owner: typing.Optional[str] = None):
         super().__init__(unique_id)
         self._line = line
         self._opcode = opcode if opcode is None else Opcode(opcode)
         self._call_target = call_target
+        self._const = const
+        self._field_name = field_name
+        self._field_owner = field_owner
 
     @property
     def call_target(self) -> str:
@@ -127,6 +175,18 @@ class ASMNode(Node):
     def is_return(self) -> bool:
         return self._opcode in self.RETURN_OPCODES
 
+    @property
+    def const(self):
+        return self._const
+
+    @property
+    def field_name(self):
+        return self._field_name
+
+    @property
+    def field_owner(self):
+        return self._field_owner
+
     def __str__(self):
         parts = []
         if self._line is not None:
@@ -135,10 +195,16 @@ class ASMNode(Node):
             parts.append("opcode={!r}".format(self._opcode))
         if self._call_target is not None:
             parts.append("call_target={!r}".format(self._call_target))
+        if self._const is not None:
+            parts.append("value={!r}".format(self._const))
+        if self._field_owner is not None and self._field_name is not None:
+            parts.append("field={!r}".format("{}/{}".format(
+                self._field_owner,
+                self._field_name)))
         return "ASM:{}".format(";".join(parts))
 
     def __repr__(self):
-        return "<{}.{} line={!r} opcode={!r} call_target{!r}>".format(
+        return "<{}.{} line={!r} opcode={!r} call_target={!r}>".format(
             __name__,
             type(self).__qualname__,
             self._line,
@@ -146,10 +212,43 @@ class ASMNode(Node):
             self._call_target,
         )
 
+    def _create_element(self) -> lxml.etree.Element:
+        return lxml.etree.Element(ASM.insn)
+
+    def to_xml(self) -> lxml.etree.Element:
+        el = super().to_xml()
+        if self._line:
+            el.set("line", str(self._line))
+        if self._call_target:
+            node = lxml.etree.Element(ASM("call-target"))
+            node.set("target", self._call_target)
+            el.append(node)
+        if self._opcode:
+            el.set("opcode", str(self._opcode.value))
+        if self._field_name and self._field_owner:
+            node = lxml.etree.Element(ASM.field)
+            node.set("name", self._field_name)
+            node.set("owner", self._field_owner)
+            el.append(node)
+        if self._const is not None:
+            if isinstance(self._const, str):
+                el.set(
+                    "value",
+                    "b64+utf8:" + base64.b64encode(
+                        self._const.encode("utf-8")
+                    ).decode("ascii")
+                )
+            else:
+                el.set("value", "raw:{!r}".format(self._const))
+        return el
+
 
 class MergeNode(Node):
     def __init__(self, unique_id):
         super().__init__(unique_id)
+
+    def _create_element(self) -> lxml.etree.Element:
+        return lxml.etree.Element(ASM.merge)
 
 
 class ExceptionNode(Node):
@@ -166,6 +265,14 @@ class ExceptionNode(Node):
             self._unique_id,
             self._type,
         )
+
+    def _create_element(self) -> lxml.etree.Element:
+        return lxml.etree.Element(ASM.exception)
+
+    def to_xml(self) -> lxml.etree.Element:
+        el = super().to_xml()
+        el.set("type", self._type)
+        return el
 
 
 class ParameterNode(Node):
@@ -188,6 +295,14 @@ class ParameterNode(Node):
     def is_parameter(self):
         return True
 
+    def _create_element(self) -> lxml.etree.Element:
+        return lxml.etree.Element(ASM.parameter)
+
+    def to_xml(self) -> lxml.etree.Element:
+        el = super().to_xml()
+        el.set("type", self._type)
+        return el
+
 
 class InlineNode(Node):
     def __init__(self, unique_id, inlined_id: str):
@@ -198,6 +313,11 @@ class InlineNode(Node):
     def inlined_id(self) -> str:
         return self._inlined_id
 
+    def to_xml(self) -> lxml.etree.Element:
+        el = super().to_xml()
+        el.set("inlined-id", self._inlined_id)
+        return el
+
 
 class PreInlineNode(InlineNode):
     def __str__(self):
@@ -206,6 +326,9 @@ class PreInlineNode(InlineNode):
             self._inlined_id,
         )
 
+    def _create_element(self) -> lxml.etree.Element:
+        return lxml.etree.Element(ASM("pre-inline"))
+
 
 class PostInlineNode(InlineNode):
     def __str__(self):
@@ -213,6 +336,9 @@ class PostInlineNode(InlineNode):
             self._unique_id,
             self._inlined_id,
         )
+
+    def _create_element(self) -> lxml.etree.Element:
+        return lxml.etree.Element(ASM("post-inline"))
 
 
 class AbstractEdge:
@@ -304,6 +430,38 @@ class ControlDataFlowGraph:
         super().__init__()
         self._blocks = []
         self._floating_nodes = []
+        self._node_id_index = {}
+
+    def assert_edge_consistency(self, around_node):
+        seen_in_edges = set()
+        seen_out_edges = set()
+
+        def check_in_edges(node, type_):
+            for in_edge in getattr(node, "_{}_in".format(type_)):
+                assert in_edge not in seen_in_edges, \
+                    "in_edge referenced by multiple nodes"
+                seen_in_edges.add(in_edge)
+                assert in_edge.to is node, \
+                    "holder of in_edge is not the actual destination"
+                assert in_edge in getattr(
+                    in_edge.from_, "_{}_out".format(type_)), \
+                    "in_edge not held by origin"
+
+        def check_out_edges(node, type_):
+            for out_edge in getattr(node, "_{}_out".format(type_)):
+                assert out_edge not in seen_out_edges, \
+                    ("out_edge referenced by multiple nodes", out_edge)
+                seen_out_edges.add(out_edge)
+                assert out_edge.from_ is node, \
+                    "holder of out_edge is not the actual origin"
+                assert out_edge in getattr(
+                    out_edge.to, "_{}_in".format(type_)), \
+                    "out_edge not held by destination"
+
+        check_in_edges(around_node, "cf")
+        check_out_edges(around_node, "cf")
+        check_in_edges(around_node, "df")
+        check_out_edges(around_node, "df")
 
     def assert_consistency(self):
         """
@@ -341,7 +499,7 @@ class ControlDataFlowGraph:
         def check_out_edges(node, type_):
             for out_edge in getattr(node, "_{}_out".format(type_)):
                 assert out_edge not in seen_out_edges, \
-                    "out_edge referenced by multiple nodes"
+                    ("out_edge referenced by multiple nodes", out_edge)
                 seen_out_edges.add(out_edge)
                 assert out_edge.from_ is node, \
                     "holder of out_edge is not the actual origin"
@@ -349,11 +507,18 @@ class ControlDataFlowGraph:
                     out_edge.to, "_{}_in".format(type_)), \
                     "out_edge not held by destination"
 
-        for node in self.nodes:
+        nodes = list(self.nodes)
+        for node in nodes:
             check_in_edges(node, "cf")
             check_in_edges(node, "df")
             check_out_edges(node, "cf")
             check_out_edges(node, "df")
+            if node.unique_id:
+                assert self._node_id_index[node.unique_id] is node
+
+        for id_, node in self._node_id_index.items():
+            assert id_ == node.unique_id
+            assert node in nodes
 
     @property
     def blocks(self) -> typing.Iterable[BasicBlock]:
@@ -418,10 +583,9 @@ class ControlDataFlowGraph:
         :raises KeyError: if the node does not belong to any basic block or
             does not belong to this :class:`ControlDataFlowGraph`.
         """
-        for block in self._blocks:
-            if node in block.nodes:
-                return block
-        raise KeyError(node)
+        if node.block is None:
+            raise KeyError(node)
+        return node.block
 
     def node_by_id(self, id_: str) -> Node:
         """
@@ -433,10 +597,7 @@ class ControlDataFlowGraph:
         :rtype: Node
         :return: The node identified by the ID.
         """
-        for node in self.nodes:
-            if node.unique_id == id_:
-                return node
-        raise KeyError(id_)
+        return self._node_id_index[id_]
 
     def new_block(self, *, id_: typing.Optional[str] = None) -> BasicBlock:
         """
@@ -478,6 +639,7 @@ class ControlDataFlowGraph:
             block._nodes.append(node)
         else:
             self._floating_nodes.append(node)
+        self._node_id_index[id_] = node
         return node
 
     def move_node(self, node: Node, insert_before: Node):
@@ -534,47 +696,86 @@ class ControlDataFlowGraph:
         old_outbound = list(node._cf_out)
         old_inbound = list(node._cf_in)
 
+        # print("detaching node with")
+        # print("  inbound:", old_inbound)
+        # print("  outbound:", old_outbound)
+
         if len(old_inbound) > 1 and len(old_outbound) > 1:
             raise ValueError("cannot detach node with multiple predecessors "
                              "and multiple successors")
 
+        # if (any(edge in old_outbound for edge in old_inbound) or
+        #         any(edge in old_inbound for edge in old_outbound)):
+        #     raise ValueError("cannot detach node which loops with itself")
+
+        if len(set(node.predecessors)) < len(list(node.predecessors)):
+            raise ValueError(
+                "cannot detach node with multiple CF flows from "
+                "a single node")
+
+        if len(set(node.successors)) < len(list(node.successors)):
+            raise ValueError(
+                "cannot detach node with multiple CF flows to "
+                "a single node")
+
         # we first patch the old links
 
-        new_edges = [
-            (in_edge, out_edge, in_edge.rebind(to=out_edge.to))
-            for in_edge in old_inbound
-            for out_edge in old_outbound
-        ]
-
-        out_edge_map = {
-            (out_edge, in_edge.from_): new_edge
-            for in_edge, out_edge, new_edge in new_edges
-        }
-
-        in_edge_map = {
-            (in_edge, out_edge.to): new_edge
-            for in_edge, out_edge, new_edge in new_edges
-        }
-
-        for out_edge in old_outbound:
-            out_edge.to._cf_in.remove(out_edge)
-            out_edge.to._cf_in.extend(
-                in_edge_map[in_edge, out_edge.to]
+        try:
+            new_edges = [
+                (in_edge, out_edge, in_edge.rebind(to=out_edge.to))
                 for in_edge in old_inbound
-            )
-
-        for in_edge in old_inbound:
-            in_edge.from_._cf_out.remove(in_edge)
-            in_edge.from_._cf_out.extend(
-                out_edge_map[out_edge, in_edge.from_]
                 for out_edge in old_outbound
-            )
+            ]
 
-        node._cf_in.clear()
-        node._cf_out.clear()
-        node._block._nodes.remove(node)
-        self._floating_nodes.append(node)
-        node._block = None
+            out_edge_map = {
+                (out_edge, in_edge.from_): new_edge
+                for in_edge, out_edge, new_edge in new_edges
+            }
+
+            in_edge_map = {
+                (in_edge, out_edge.to): new_edge
+                for in_edge, out_edge, new_edge in new_edges
+            }
+
+            for out_edge in old_outbound:
+                # print("replacing", out_edge)
+                new = [
+                    in_edge_map[in_edge, out_edge.to]
+                    for in_edge in old_inbound
+                ]
+                # print("  with", new)
+                out_edge.to._cf_in.remove(out_edge)
+                out_edge.to._cf_in.extend(new)
+
+            for in_edge in old_inbound:
+                # print("replacing", in_edge)
+                in_edge.from_._cf_out.remove(in_edge)
+                new = [
+                    out_edge_map[out_edge, in_edge.from_]
+                    for out_edge in old_outbound
+                ]
+                # print("  with", new)
+                in_edge.from_._cf_out.extend(new)
+
+            neighbours = list(node.successors) + list(node.predecessors)
+            try:
+                for neigh in neighbours:
+                    self.assert_edge_consistency(neigh)
+            except AssertionError as exc:
+                logger.debug("detaching node: %r", node)
+                logger.debug("old_inbound = %r", old_inbound)
+                logger.debug("old_outbound = %r", old_outbound)
+                raise RuntimeError("internal consistency error: {}".format(exc))
+
+            node._cf_in.clear()
+            node._cf_out.clear()
+            node._block._nodes.remove(node)
+            self._floating_nodes.append(node)
+            node._block = None
+
+
+        except (ValueError, KeyError) as exc:
+            raise RuntimeError("internal consistency error: {}".format(exc))
 
     def add_successor(self, at: Node, successor: Node, **kwargs):
         """
@@ -901,20 +1102,31 @@ class ControlDataFlowGraph:
         The basic blocks are expanded as far as possible.
         """
 
-        while True:
-            for bb in self._blocks:
-                if not bb._nodes:
-                    continue
-                last = bb._nodes[-1]
-                if len(last._cf_out) != 1:
-                    continue
-                dest = last._cf_out[0].to.block
-                if len(dest._nodes[0]._cf_in) != 1:
-                    continue
-                self.join_blocks(bb, dest)
-                break
-            else:
-                break
+        for bb in list(self._blocks):
+            if not bb._nodes:
+                continue
+            first = bb._nodes[0]
+            if len(first._cf_in) != 1:
+                continue
+            dest = first._cf_in[0].from_.block
+            if len(dest._nodes[-1]._cf_out) != 1:
+                continue
+            self.join_blocks(dest, bb)
+
+        # while True:
+        #     for bb in self._blocks:
+        #         if not bb._nodes:
+        #             continue
+        #         last = bb._nodes[-1]
+        #         if len(last._cf_out) != 1:
+        #             continue
+        #         dest = last._cf_out[0].to.block
+        #         if len(dest._nodes[0]._cf_in) != 1:
+        #             continue
+        #         self.join_blocks(bb, dest)
+        #         break
+        #     else:
+        #         break
 
     def remove_node(self, node: Node):
         """
@@ -926,13 +1138,76 @@ class ControlDataFlowGraph:
         block = node._block
         if block is not None:
             self.detach_node(node)
-        self._floating_nodes.remove(node)
-        for in_edge in node._df_in:
-            in_edge.from_._df_out.remove(in_edge)
-        for out_edge in node._df_out:
-            out_edge.to._df_in.remove(out_edge)
-        node._df_in.clear()
-        node._df_out.clear()
+        try:
+            self._floating_nodes.remove(node)
+            assert not node._cf_in
+            assert not node._cf_out
+            for in_edge in node._df_in:
+                in_edge.from_._df_out.remove(in_edge)
+            for out_edge in node._df_out:
+                out_edge.to._df_in.remove(out_edge)
+            node._df_in.clear()
+            node._df_out.clear()
+            del self._node_id_index[node.unique_id]
+        except (KeyError, ValueError) as exc:
+            raise RuntimeError("internal consistency error: {}".format(exc))
+
+    def _delete_cf_edge(self, edge: ControlFlowEdge):
+        edge.from_._cf_out.remove(edge)
+        edge.to._cf_in.remove(edge)
+
+    def _delete_df_edge(self, edge: DataFlowEdge):
+        edge.from_._df_out.remove(edge)
+        edge.to._df_in.remove(edge)
+
+    def remove_block(self, bb: BasicBlock):
+        """
+        Remove a basic block frmo the CDFG.
+        """
+        self._blocks.remove(bb)
+        if not bb._nodes:
+            return
+
+        head = bb._nodes[0]
+        for edge in list(head._cf_in):
+            self._delete_cf_edge(edge)
+
+        tail = bb._nodes[-1]
+        for edge in list(tail._cf_out):
+            self._delete_cf_edge(edge)
+
+        for node in bb._nodes:
+            for edge in list(node._df_out):
+                self._delete_df_edge(edge)
+            for edge in list(node._df_in):
+                self._delete_df_edge(edge)
+
+        for node in bb._nodes:
+            del self._node_id_index[node.unique_id]
+
+    def strip_exceptional(self):
+        """
+        Strip exceptional control flows and then orpahned basic blocks.
+
+        All exceptional control flows are removed; the basic blocks which
+        become orphaned by this operation are removed recursively.
+        """
+        known_heads = set(self.heads)
+
+        for block in self._blocks:
+            if not block._nodes:
+                continue
+            head = block._nodes[0]
+            for edge in list(head._cf_in):
+                if edge.is_exceptional:
+                    self._delete_cf_edge(edge)
+
+        curr_heads = set(self.heads)
+        while curr_heads != known_heads:
+            new_heads = curr_heads - known_heads
+            for block in new_heads:
+                self.remove_block(block)
+            curr_heads = set(self.heads)
 
 
 def _load_param_nodes(cdfg: ControlDataFlowGraph,
@@ -976,7 +1251,21 @@ def _load_asm_nodes(cdfg: ControlDataFlowGraph,
     edges = []
     inputs = []
 
+    logger.debug("loading %d nodes", len(xmlnodes))
+
     for i, xmlnode in enumerate(xmlnodes.iterchildren()):
+        if i % 1000 == 0:
+            logger.debug("loaded %d out of %d nodes", i, len(xmlnodes))
+
+        if xmlnode.tag == ASM.exception:
+            # can only occur in code generated by cdfg-xml
+            node = cdfg.new_node(
+                ExceptionNode,
+                id_=xmlnode.get("id"),
+                type_=xmlnode.get("type"),
+            )
+            continue
+
         bb_id = "{}/basic-blocks/{}".format(method, i)
         bb = cdfg.new_block(id_=bb_id)
 
@@ -988,11 +1277,32 @@ def _load_asm_nodes(cdfg: ControlDataFlowGraph,
         if opcode is not None:
             opcode = int(opcode)
 
+        const_s = xmlnode.get("value")
+        if const_s is not None:
+            if const_s == "raw:null":
+                const = None
+            elif const_s.startswith("b64+utf8:"):
+                const = base64.b64decode(const_s[9:]).decode("utf-8")
+            elif const_s.startswith("raw:"):
+                const = ast.literal_eval(const_s[4:])
+            else:
+                raise ValueError("unsupported const: {!r}".format(const_s))
+        else:
+            const = None
+
         xmlcall_target = xmlnode.find(ASM("call-target"))
         if xmlcall_target is not None:
             call_target = xmlcall_target.get("target")
         else:
             call_target = None
+
+        xmlfield = xmlnode.find(ASM("field"))
+        if xmlfield is not None:
+            field_name = xmlfield.get("name")
+            field_owner = xmlfield.get("owner")
+        else:
+            field_name = None
+            field_owner = None
 
         node = cdfg.new_node(
             ASMNode,
@@ -1001,25 +1311,43 @@ def _load_asm_nodes(cdfg: ControlDataFlowGraph,
             line=line,
             opcode=opcode,
             call_target=call_target,
+            const=const,
+            field_name=field_name,
+            field_owner=field_owner,
         )
 
         xmlexits = xmlnode.find(ASM.exits)
         if xmlexits is not None:
             for exit in xmlexits:
+                kwargs = {}
+                if exit.get("exceptional") == "true":
+                    kwargs["is_exceptional"] = True
                 edges.append(
-                    (node.unique_id, exit.get("to"))
+                    (node.unique_id, exit.get("to"), kwargs)
                 )
         xmlinputs = xmlnode.find(ASM.inputs)
         if xmlinputs is not None:
             inputs.extend(_load_asm_inputs(cdfg, node.unique_id, xmlinputs))
 
-    for from_, to in edges:
+    logger.debug("nodes loaded, adding %d control flow edges",
+                 len(edges))
+
+    for i, (from_, to, kwargs) in enumerate(edges):
+        if i % 10000 == 0:
+            logger.debug("added %d out of %d control flow edges",
+                         i, len(edges))
         from_node = cdfg.node_by_id(from_)
         to_node = cdfg.node_by_id(to)
 
-        cdfg.add_successor(from_node, to_node)
+        cdfg.add_successor(from_node, to_node, **kwargs)
 
-    for from_, to in inputs:
+    logger.debug("nodes loaded, adding %d data flow edges",
+                 len(inputs))
+
+    for i, (from_, to) in enumerate(inputs):
+        if i % 10000 == 0:
+            logger.debug("added %d out of %d control flow edges",
+                         i, len(inputs))
         from_node = cdfg.node_by_id(from_)
         to_node = cdfg.node_by_id(to)
 
@@ -1037,18 +1365,34 @@ def load_asm(tree: lxml.etree.Element) -> ControlDataFlowGraph:
     if insns is not None:
         _load_asm_nodes(result, tree.get("id"), insns)
 
+    logger.debug("simplifying %d basic blocks", len(list(result.blocks)))
     result.simplify_basic_blocks()
+    logger.debug("simplifed down to %d basic blocks", len(list(result.blocks)))
 
     for node in list(result.nodes):
         if node.block is None:
             continue
         if not isinstance(node, ASMNode):
             continue
-        if node.opcode == -1:
-            try:
-                result.detach_node(node)
-                result.remove_node(node)
-            except ValueError:
-                pass
+        # if node.opcode == -1:
+        #     try:
+        #         result.detach_node(node)
+        #         result.remove_node(node)
+        #     except ValueError:
+        #         pass
 
+    return result
+
+
+def save_asm(cdfg: ControlDataFlowGraph) -> lxml.etree.Element:
+    result = lxml.etree.Element(ASM.graph)
+    params_node = lxml.etree.Element(ASM.parameters)
+    result.append(params_node)
+    insns_node = lxml.etree.Element(ASM.insns)
+    result.append(insns_node)
+    for node in cdfg.nodes:
+        if node.is_parameter:
+            params_node.append(node.to_xml())
+        else:
+            insns_node.append(node.to_xml())
     return result

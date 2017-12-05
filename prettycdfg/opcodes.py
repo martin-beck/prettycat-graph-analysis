@@ -163,3 +163,12 @@ class Opcode(enum.IntEnum):
 
     def __repr__(self):
         return "Opcode.{}({})".format(self.name, self.value)
+
+
+CALL_OPCODES = [
+    Opcode.INVOKEDYNAMIC,
+    Opcode.INVOKEINTERFACE,
+    Opcode.INVOKESPECIAL,
+    Opcode.INVOKESTATIC,
+    Opcode.INVOKEVIRTUAL,
+]

@@ -1,13 +1,102 @@
 #!/usr/bin/env python3
+import collections.abc
+import copy
+import fnmatch
+import functools
 import itertools
 import logging
 import typing
 
 import prettycdfg.nodes
+import prettycdfg.opcodes
 
 from prettycdfg.xmlutil import ASM
 
 import lxml.etree as etree
+
+
+class LazyGraphs(collections.abc.Mapping):
+    def __init__(self, tree, loader):
+        super().__init__()
+        self._loader = loader
+        self._treeindex = {
+            xmlmethod.get("id"): xmlmethod
+            for xmlmethod in tree.getroot()
+        }
+        self._loaded = {}
+        self._filters = []
+
+    def add_filter(self, filter_func):
+        self._filters.append(filter_func)
+
+    def _load(self, key):
+        # print("\nLOADING", key, "\n")
+        cdfg = self._loader(self._treeindex[key])
+        for filter_func in self._filters:
+            filter_func(cdfg)
+        self._loaded[key] = cdfg
+        return cdfg
+
+    def __getitem__(self, key):
+        try:
+            return self._loaded[key]
+        except KeyError:
+            pass
+        return self._load(key)
+
+    def __iter__(self):
+        return iter(self._treeindex)
+
+    def __len__(self):
+        return len(self._treeindex)
+
+    def __contains__(self, key):
+        return key in self._treeindex
+
+
+def load_type_overrides(f) -> typing.Mapping[str, str]:
+    mapping = {}
+
+    for line in f:
+        if line.startswith("#"):
+            continue
+
+        if not line.strip():
+            continue
+
+        try:
+            lhs, rhs = line.split()
+        except ValueError:
+            raise ValueError("malformed type override line: {!r}".format(
+                line
+            ))
+
+        mapping[lhs] = rhs
+
+    return mapping
+
+
+def load_method_matchers(f) -> typing.Sequence[typing.Callable]:
+    matchers = []
+
+    for line in f:
+        if line.startswith("#"):
+            continue
+
+        if not line.strip():
+            continue
+        line = line[:-1]
+
+        if any(ch == "*" or ch == "?" for ch in line):
+            matchers.append(
+                functools.partial(fnmatch.fnmatch, pat=line)
+            )
+        else:
+            matchers.append(
+                lambda x: x == line
+            )
+
+    return matchers
 
 
 def load_graphs(f):
@@ -16,17 +105,15 @@ def load_graphs(f):
 
     methods = {}
     if tree.getroot().tag == ASM.asm:
-        loader = prettycdfg.nodes.load_asm
+        return LazyGraphs(tree, prettycdfg.nodes.load_asm)
+    elif tree.getroot().tag == ASM.graph:
+        return {
+            tree.getroot().get("id"): prettycdfg.nodes.load_asm(tree.getroot())
+        }
     else:
         raise ValueError("unsupported graph type: {!r}".format(
             tree.getroot().tag
         ))
-
-    for xmlmethod in tree.getroot():
-        id_ = xmlmethod.get("id")
-        methods[id_] = loader(xmlmethod)
-
-    return methods
 
 
 def bb_graph_dot(args,
@@ -105,37 +192,208 @@ def bb_graph_dot(args,
         print("}", file=f)
 
 
+def inline_call(
+        cdfg: prettycdfg.nodes.ControlDataFlowGraph,
+        node: prettycdfg.nodes.Node,
+        graphs: typing.Mapping[
+            str,
+            prettycdfg.nodes.ControlDataFlowGraph],
+        seen: typing.Set[str]):
+    if node.call_target in seen:
+        logging.warning("inline aborted due to recursion at %r",
+                        node.call_target)
+        return
+
+    seen = seen | {node.call_target}
+
+    try:
+        src_graph = graphs[node.call_target]
+    except KeyError:
+        logging.warning("cannot inline %r: graph not available",
+                        node.call_target)
+        return
+
+    new_graph = prettycdfg.nodes.ControlDataFlowGraph()
+    new_graph.merge(src_graph)
+    del src_graph
+
+    for child_node in list(new_graph.nodes):
+        if (not hasattr(child_node, "call_target") or
+                child_node.call_target is None):
+            continue
+        # print("inlining {} into {}".format(child_node.call_target,
+        #                                    node.call_target))
+        inline_call(new_graph, child_node, graphs, seen)
+
+    cdfg.inline_call(node, new_graph, inlined_id=node.call_target)
+    cdfg.assert_consistency()
+
+
 def inline_calls(
+        id_: str,
         cdfg: prettycdfg.nodes.ControlDataFlowGraph,
         graphs: typing.Mapping[
             str,
             prettycdfg.nodes.ControlDataFlowGraph]):
-    while True:
-        for node in list(cdfg.nodes):
-            if not hasattr(node, "call_target") or node.call_target is None:
-                continue
-            call_target = node.call_target
-            try:
-                source_graph = graphs[call_target]
-            except KeyError:
-                logging.warning("cannot find source graph for method call %r",
-                                call_target)
-                continue
-            cdfg.inline_call(node, source_graph,
-                             inlined_id=call_target)
-            break
-        else:
-            break
+    # print()
+    # print("--- INLINE START ---")
+    # print()
+    for node in list(cdfg.nodes):
+        if not hasattr(node, "call_target") or node.call_target is None:
+            continue
+        # print("inlining {} into {}".format(node.call_target, id_))
+        inline_call(cdfg, node, graphs, {id_})
+    cdfg.assert_consistency()
+
+
+def strip_asm_stack_instructions(cdfg: prettycdfg.nodes.ControlDataFlowGraph):
+    TO_DELETE = [
+        prettycdfg.opcodes.Opcode.ILOAD,
+        prettycdfg.opcodes.Opcode.LLOAD,
+        prettycdfg.opcodes.Opcode.FLOAD,
+        prettycdfg.opcodes.Opcode.DLOAD,
+        prettycdfg.opcodes.Opcode.ALOAD,
+        prettycdfg.opcodes.Opcode.ISTORE,
+        prettycdfg.opcodes.Opcode.LSTORE,
+        prettycdfg.opcodes.Opcode.FSTORE,
+        prettycdfg.opcodes.Opcode.DSTORE,
+        prettycdfg.opcodes.Opcode.ASTORE,
+        prettycdfg.opcodes.Opcode.DUP,
+        prettycdfg.opcodes.Opcode.RETURN,
+        prettycdfg.opcodes.Opcode.INVALID,
+    ]
+
+    for node in list(cdfg.nodes):
+        if not isinstance(node, prettycdfg.nodes.ASMNode):
+            continue
+        if node.opcode in TO_DELETE:
+            if (not node._df_in and
+                    not node._df_out and
+                    len(node._cf_in) <= 1 and
+                    len(node._cf_out) <= 1):
+                cdfg.remove_node(node)
+                cdfg.assert_consistency()
+
+
+def apply_type_overrides(
+        overrides: typing.Mapping[str, str],
+        graph: prettycdfg.nodes.ControlDataFlowGraph):
+    for node in graph.nodes:
+        if not isinstance(node, prettycdfg.nodes.ASMNode):
+            continue
+
+        if node.opcode not in prettycdfg.opcodes.CALL_OPCODES:
+            continue
+        if node.opcode == prettycdfg.opcodes.Opcode.INVOKESTATIC:
+            continue
+
+        old_call_target = node.call_target
+        assert old_call_target.startswith("java:")
+        old_owner, method_sig = old_call_target[5:].rsplit(".", 1)
+        assert "[" not in old_owner, \
+            "splitting doesn’t work, we need something stronger"
+
+        try:
+            new_owner = overrides[old_owner]
+        except KeyError:
+            # print("no type override for {}".format(node),
+            #       file=sys.stderr)
+            continue
+
+        # patch things!
+        node._call_target = "java:{}.{}".format(new_owner, method_sig)
+
+        print(
+            "apply_type_overrides: patched {!r} -> {!r}".format(
+                old_call_target,
+                node.call_target,
+            ),
+            file=sys.stderr,
+        )
+
+
+def strip_non_calls(
+        method_matchers: typing.Sequence[typing.Callable],
+        graph: prettycdfg.nodes.ControlDataFlowGraph):
+
+    def try_remove_node(cdfg, node):
+        logging.debug("removing node: %s", node)
+        try:
+            cdfg.remove_node(node)
+        except ValueError as exc:
+            logging.debug("cannot strip non-call node %r: %s", node, exc)
+            return
+        # logging.debug("checking consistency")
+        # graph.assert_consistency()
+
+    for node in list(graph.nodes):
+        if not node.block:
+            continue
+
+        if not isinstance(node, prettycdfg.nodes.ASMNode):
+            try_remove_node(graph, node)
+            continue
+
+        if node.opcode not in prettycdfg.opcodes.CALL_OPCODES:
+            try_remove_node(graph, node)
+            continue
+
+        assert hasattr(node, "call_target") and node.call_target
+
+        # print(node.call_target, [matcher(node.call_target)
+        #                          for matcher in method_matchers],
+        #       file=sys.stderr)
+        if not any(matcher(node.call_target) for matcher in method_matchers):
+            try_remove_node(graph, node)
+            continue
+
+
+def get_full_graph(args, graphs):
+    logging.debug("getting graph for method %r", args.method)
+
+    if args.type_overrides:
+        logging.debug("loading type overrides")
+        with args.type_overrides as f:
+            overrides = load_type_overrides(f)
+
+        logging.debug("using type overrides: %r", overrides)
+
+        graphs.add_filter(functools.partial(
+            apply_type_overrides,
+            overrides,
+        ))
+
+    logging.debug("loading graph")
+    cdfg = graphs[args.method]
+
+    if args.inline:
+        logging.debug("inlining method calls as far as possible")
+        inline_calls(args.method, cdfg, graphs)
+
+    if args.simplify:
+        logging.debug("simplifying graph")
+        cdfg.strip_exceptional()
+        cdfg.simplify_basic_blocks()
+        strip_asm_stack_instructions(cdfg)
+
+    if args.strip_non_calls:
+        logging.debug("loading list of method calls to keep")
+        with args.strip_non_calls as f:
+            method_matchers = load_method_matchers(f)
+
+        logging.debug("using method matchers: %r", method_matchers)
+
+        strip_non_calls(method_matchers, cdfg)
+
+    logging.debug("graph for %r loaded", args.method)
+    return cdfg
 
 
 def cdfg_dot(args,
              graphs: typing.Mapping[
                  str,
                  prettycdfg.nodes.ControlDataFlowGraph]):
-    cdfg = graphs[args.method]
-
-    if args.inline:
-        inline_calls(cdfg, graphs)
+    cdfg = get_full_graph(args, graphs)
 
     if args.outfile is None:
         f = sys.stdout
@@ -145,7 +403,7 @@ def cdfg_dot(args,
     def emit_inputs(node, f):
         for i, input_ in enumerate(node.inputs):
             print(
-                '"{}" -> "{}" [style=dashed,headlabel="in {}"]'.format(
+                '"{}" -> "{}" [style=dashed,headlabel="in {}",color=blue]'.format(
                     input_.unique_id,
                     node.unique_id,
                     i,
@@ -223,6 +481,24 @@ def cdfg_dot(args,
         print('}', file=f)
 
 
+def cdfg_xml(args,
+             graphs: typing.Mapping[
+                 str,
+                 prettycdfg.nodes.ControlDataFlowGraph]):
+    cdfg = get_full_graph(args, graphs)
+
+    tree = prettycdfg.nodes.save_asm(cdfg)
+    tree.set("id", args.method)
+
+    if args.outfile is None:
+        f = sys.stdout.buffer.raw
+    else:
+        f = open(args.outfile, "wb")
+
+    with f:
+        tree.getroottree().write(f)
+
+
 def main():
     import argparse
     import sys
@@ -237,6 +513,30 @@ def main():
         action="store_true",
         default=False,
         help="Inline all the function calls",
+    )
+    parser.add_argument(
+        "--no-simplify",
+        default=True,
+        dest="simplify",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--type-overrides",
+        default=None,
+        type=argparse.FileType("r"),
+        help="File with field type overrides to apply to invocations"
+    )
+    parser.add_argument(
+        "--strip-non-calls",
+        default=None,
+        type=argparse.FileType("r"),
+        help="Strip all non-floating nodes which are not function calls to the given classes, interfaces or methods."
+    )
+    parser.add_argument(
+        "-v",
+        dest="verbosity",
+        action="count",
+        default=0,
     )
 
     subparsers = parser.add_subparsers()
@@ -270,13 +570,34 @@ def main():
         default=False,
     )
 
+    subparser = subparsers.add_parser("cdfg-xml")
+    subparser.set_defaults(func=cdfg_xml)
+    subparser.add_argument(
+        "method",
+        help="Method to dump the graph for"
+    )
+    subparser.add_argument(
+        "outfile",
+        nargs="?",
+        help="File to dump the XML graph to"
+    )
+
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level={
+            0: logging.ERROR,
+            1: logging.WARNING,
+            2: logging.INFO,
+        }.get(args.verbosity, logging.DEBUG),
+    )
 
     if not hasattr(args, "func"):
         print("a subcommand is required", file=sys.stderr)
         parser.print_help()
         return 1
 
+    logging.debug("opening graph data from %s", args.graph.name)
     methods = load_graphs(args.graph)
     args.func(args, methods)
 
