@@ -120,7 +120,7 @@ def bb_graph_dot(args,
                  graphs: typing.Mapping[
                      str,
                      prettycdfg.nodes.ControlDataFlowGraph]):
-    cdfg = graphs[args.method]
+    cdfg = get_full_graph(args, graphs)
 
     if args.outfile is None:
         f = sys.stdout
