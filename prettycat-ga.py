@@ -175,7 +175,7 @@ def bb_graph_dot(args,
                     src_block = cdfg.block_by_node(node)
                 except KeyError:
                     print(
-                        '"{}" -> "bb_{}" [style=dashed];'.format(
+                        '"{}" -> "bb_{}" [style=dashed,color=blue];'.format(
                             node.unique_id,
                             block.unique_id,
                         ),
@@ -183,7 +183,7 @@ def bb_graph_dot(args,
                     )
                 else:
                     print(
-                        '"bb_{}" -> "bb_{}" [style=dashed];'.format(
+                        '"bb_{}" -> "bb_{}" [style=dashed,color=blue];'.format(
                             src_block.unique_id,
                             block.unique_id,
                         ),
