@@ -504,44 +504,57 @@ def main():
     import sys
 
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "graph",
-        type=argparse.FileType("rb")
+
+    group = parser.add_argument_group("Global options")
+    group.add_argument(
+        "-v",
+        dest="verbosity",
+        action="count",
+        default=0,
+        help="Increase verbosity (up to -vvv)"
     )
-    parser.add_argument(
+
+    group = parser.add_argument_group("Input processing options")
+    group.add_argument(
         "--inline",
         action="store_true",
         default=False,
         help="Inline all the function calls",
     )
-    parser.add_argument(
+    group.add_argument(
         "--no-simplify",
         default=True,
         dest="simplify",
         action="store_false",
     )
-    parser.add_argument(
+    group.add_argument(
         "--type-overrides",
         default=None,
         type=argparse.FileType("r"),
-        help="File with field type overrides to apply to invocations"
+        help="File with field type overrides to apply to invocations",
+        metavar="FILE",
     )
-    parser.add_argument(
+    group.add_argument(
         "--strip-non-calls",
         default=None,
         type=argparse.FileType("r"),
-        help="Strip all non-floating nodes which are not function calls to the given classes, interfaces or methods."
+        help="Strip all non-floating nodes which are not function calls to "
+        "the given classes, interfaces or methods.",
+        metavar="FILE",
     )
+
     parser.add_argument(
-        "-v",
-        dest="verbosity",
-        action="count",
-        default=0,
+        "graph",
+        type=argparse.FileType("rb"),
+        help="XML CDFG input"
     )
 
-    subparsers = parser.add_subparsers()
+    subparsers = parser.add_subparsers(title="Command")
 
-    subparser = subparsers.add_parser("bb-graph-dot")
+    subparser = subparsers.add_parser(
+        "bb-graph-dot",
+        description="Plot dot graph of the basic blocks in the selected method."
+    )
     subparser.set_defaults(func=bb_graph_dot)
     subparser.add_argument(
         "method",
@@ -553,7 +566,11 @@ def main():
         help="File to dump the graph to"
     )
 
-    subparser = subparsers.add_parser("cdfg-dot")
+    subparser = subparsers.add_parser(
+        "cdfg-dot",
+        description="Print the control- and data-flow graph of the method as "
+        "dot."
+    )
     subparser.set_defaults(func=cdfg_dot)
     subparser.add_argument(
         "method",
@@ -570,7 +587,11 @@ def main():
         default=False,
     )
 
-    subparser = subparsers.add_parser("cdfg-xml")
+    subparser = subparsers.add_parser(
+        "cdfg-xml",
+        description="Print an XML file which contains only the CDFG of the "
+        "method (this is useful when input processing options are used)."
+    )
     subparser.set_defaults(func=cdfg_xml)
     subparser.add_argument(
         "method",
