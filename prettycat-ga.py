@@ -211,8 +211,8 @@ def inline_call(
     try:
         src_graph = graphs[node.call_target]
     except KeyError:
-        logger.warning("cannot inline %r: graph not available",
-                       node.call_target)
+        logger.info("cannot inline %r: graph not available",
+                    node.call_target)
         return
 
     new_graph = prettycdfg.nodes.ControlDataFlowGraph()
