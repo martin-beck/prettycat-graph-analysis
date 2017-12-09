@@ -199,9 +199,11 @@ def inline_call(
             str,
             prettycdfg.nodes.ControlDataFlowGraph],
         seen: typing.Set[str]):
+    logger = logging.getLogger("inline")
+
     if node.call_target in seen:
-        logging.warning("inline aborted due to recursion at %r",
-                        node.call_target)
+        logger.warning("inline aborted due to recursion at %r",
+                       node.call_target)
         return
 
     seen = seen | {node.call_target}
@@ -209,8 +211,8 @@ def inline_call(
     try:
         src_graph = graphs[node.call_target]
     except KeyError:
-        logging.warning("cannot inline %r: graph not available",
-                        node.call_target)
+        logger.warning("cannot inline %r: graph not available",
+                       node.call_target)
         return
 
     new_graph = prettycdfg.nodes.ControlDataFlowGraph()
@@ -221,8 +223,9 @@ def inline_call(
         if (not hasattr(child_node, "call_target") or
                 child_node.call_target is None):
             continue
-        # print("inlining {} into {}".format(child_node.call_target,
-        #                                    node.call_target))
+        logger.debug("inlining %r into %r",
+                     child_node.call_target,
+                     node.call_target)
         inline_call(new_graph, child_node, graphs, seen)
 
     cdfg.inline_call(node, new_graph, inlined_id=node.call_target)
@@ -278,6 +281,8 @@ def strip_asm_stack_instructions(cdfg: prettycdfg.nodes.ControlDataFlowGraph):
 def apply_type_overrides(
         overrides: typing.Mapping[str, str],
         graph: prettycdfg.nodes.ControlDataFlowGraph):
+    logger = logging.getLogger("type_overrides")
+
     for node in graph.nodes:
         if not isinstance(node, prettycdfg.nodes.ASMNode):
             continue
@@ -303,25 +308,24 @@ def apply_type_overrides(
         # patch things!
         node._call_target = "java:{}.{}".format(new_owner, method_sig)
 
-        print(
-            "apply_type_overrides: patched {!r} -> {!r}".format(
-                old_call_target,
-                node.call_target,
-            ),
-            file=sys.stderr,
+        logger.info(
+            "patched %r -> %r",
+            old_call_target,
+            node.call_target,
         )
 
 
 def strip_non_calls(
         method_matchers: typing.Sequence[typing.Callable],
         graph: prettycdfg.nodes.ControlDataFlowGraph):
+    logger = logging.getLogger("strip_non_calls")
 
     def try_remove_node(cdfg, node):
-        logging.debug("removing node: %s", node)
+        logger.debug("removing node: %s", node)
         try:
             cdfg.remove_node(node)
         except ValueError as exc:
-            logging.debug("cannot strip non-call node %r: %s", node, exc)
+            logger.info("cannot strip non-call node %r: %s", node, exc)
             return
         # logging.debug("checking consistency")
         # graph.assert_consistency()
