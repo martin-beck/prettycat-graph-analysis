@@ -293,8 +293,7 @@ def apply_type_overrides(
             continue
 
         old_call_target = node.call_target
-        assert old_call_target.startswith("java:")
-        old_owner, method_sig = old_call_target[5:].rsplit(".", 1)
+        old_owner, method_sig = old_call_target.rsplit(".", 1)
         assert "[" not in old_owner, \
             "splitting doesn’t work, we need something stronger"
 
@@ -306,7 +305,7 @@ def apply_type_overrides(
             continue
 
         # patch things!
-        node._call_target = "java:{}.{}".format(new_owner, method_sig)
+        node._call_target = "{}.{}".format(new_owner, method_sig)
 
         logger.info(
             "patched %r -> %r",
