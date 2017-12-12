@@ -249,7 +249,12 @@ def inline_calls(
     cdfg.assert_consistency()
 
 
-def strip_asm_stack_instructions(cdfg: prettycdfg.nodes.ControlDataFlowGraph):
+def strip_asm_stack_instructions_safe(
+        cdfg: prettycdfg.nodes.ControlDataFlowGraph):
+    logger = logging.getLogger("strip_asm_stack_instructions")
+    logger.debug("operating on graph with %d nodes (safe for inlining)",
+                 len(cdfg))
+
     TO_DELETE = [
         prettycdfg.opcodes.Opcode.ILOAD,
         prettycdfg.opcodes.Opcode.LLOAD,
@@ -262,7 +267,6 @@ def strip_asm_stack_instructions(cdfg: prettycdfg.nodes.ControlDataFlowGraph):
         prettycdfg.opcodes.Opcode.DSTORE,
         prettycdfg.opcodes.Opcode.ASTORE,
         prettycdfg.opcodes.Opcode.DUP,
-        prettycdfg.opcodes.Opcode.RETURN,
         prettycdfg.opcodes.Opcode.INVALID,
     ]
 
@@ -275,7 +279,38 @@ def strip_asm_stack_instructions(cdfg: prettycdfg.nodes.ControlDataFlowGraph):
                     len(node._cf_in) <= 1 and
                     len(node._cf_out) <= 1):
                 cdfg.remove_node(node)
-                cdfg.assert_consistency()
+
+
+def strip_asm_stack_instructions(
+        cdfg: prettycdfg.nodes.ControlDataFlowGraph):
+    logger = logging.getLogger("strip_asm_stack_instructions")
+    logger.debug("operating on graph with %d nodes (unsafe for inlining)",
+                 len(cdfg))
+    TO_DELETE = [
+        prettycdfg.opcodes.Opcode.ILOAD,
+        prettycdfg.opcodes.Opcode.LLOAD,
+        prettycdfg.opcodes.Opcode.FLOAD,
+        prettycdfg.opcodes.Opcode.DLOAD,
+        prettycdfg.opcodes.Opcode.ALOAD,
+        prettycdfg.opcodes.Opcode.ISTORE,
+        prettycdfg.opcodes.Opcode.LSTORE,
+        prettycdfg.opcodes.Opcode.FSTORE,
+        prettycdfg.opcodes.Opcode.DSTORE,
+        prettycdfg.opcodes.Opcode.ASTORE,
+        prettycdfg.opcodes.Opcode.DUP,
+        prettycdfg.opcodes.Opcode.INVALID,
+        prettycdfg.opcodes.Opcode.RETURN,
+    ]
+
+    for node in list(cdfg.nodes):
+        if not isinstance(node, prettycdfg.nodes.ASMNode):
+            continue
+        if node.opcode in TO_DELETE:
+            if (not node._df_in and
+                    not node._df_out and
+                    len(node._cf_in) <= 1 and
+                    len(node._cf_out) <= 1):
+                cdfg.remove_node(node)
 
 
 def apply_type_overrides(
@@ -365,6 +400,11 @@ def get_full_graph(args, graphs):
             apply_type_overrides,
             overrides,
         ))
+
+        if args.simplify:
+            graphs.add_filter(functools.partial(
+                strip_asm_stack_instructions_safe,
+            ))
 
     logging.debug("loading graph")
     cdfg = graphs[args.method]
