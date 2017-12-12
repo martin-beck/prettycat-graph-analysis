@@ -743,7 +743,7 @@ class ControlDataFlowGraph:
 
             for in_edge, out_edge, new_edge in list(new_edges):
                 pair = new_edge.from_, new_edge.to
-                print(seen_pair, pair)
+                # print(seen_pair, pair)
                 if pair in seen_pair:
                     new_edges.remove((in_edge, out_edge, new_edge))
                     continue
