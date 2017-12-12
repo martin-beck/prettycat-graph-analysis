@@ -1351,6 +1351,30 @@ class TestControlDataFlowGraph(unittest.TestCase):
         self.assertCountEqual(n1.successors, [n4])
         self.assertCountEqual(n4.predecessors, [n1])
 
+    def test_remove_node_with_two_links(self):
+        bb1 = self.cdfg.new_block(id_="bb1")
+        bb2 = self.cdfg.new_block(id_="bb2")
+        bb3 = self.cdfg.new_block(id_="bb3")
+        bb4 = self.cdfg.new_block(id_="bb4")
+
+        n1 = self.cdfg.new_node(nodes.Node, id_="n1", block=bb1)
+        n2 = self.cdfg.new_node(nodes.Node, id_="n2", block=bb2)
+        n3 = self.cdfg.new_node(nodes.Node, id_="n3", block=bb3)
+        n4 = self.cdfg.new_node(nodes.Node, id_="n4", block=bb4)
+
+        self.cdfg.add_successor(n1, n2)
+        self.cdfg.add_successor(n1, n3)
+        self.cdfg.add_successor(n2, n4)
+        self.cdfg.add_successor(n3, n4)
+
+        print(n1._cf_out)
+        print(n4._cf_in)
+        self.cdfg.remove_node(n2)
+        self.cdfg.remove_node(n3)
+
+        self.assertCountEqual(n4.predecessors, [n1])
+        self.assertCountEqual(n1.successors, [n4])
+
 
 class Testload_asm(unittest.TestCase):
     def setUp(self):

@@ -731,6 +731,24 @@ class ControlDataFlowGraph:
                 for out_edge in old_outbound
             ]
 
+            seen_pair = {
+                (existing_in_edge.from_, existing_in_edge.to)
+                for old_out_edge in old_outbound
+                for existing_in_edge in old_out_edge.to._cf_in
+            } | {
+                (existing_out_edge.from_, existing_out_edge.to)
+                for old_in_edge in old_inbound
+                for existing_out_edge in old_in_edge.from_._cf_out
+            }
+
+            for in_edge, out_edge, new_edge in list(new_edges):
+                pair = new_edge.from_, new_edge.to
+                print(seen_pair, pair)
+                if pair in seen_pair:
+                    new_edges.remove((in_edge, out_edge, new_edge))
+                    continue
+                seen_pair.add(pair)
+
             out_edge_map = {
                 (out_edge, in_edge.from_): new_edge
                 for in_edge, out_edge, new_edge in new_edges
@@ -746,6 +764,7 @@ class ControlDataFlowGraph:
                 new = [
                     in_edge_map[in_edge, out_edge.to]
                     for in_edge in old_inbound
+                    if (in_edge, out_edge.to) in in_edge_map
                 ]
                 # print("  with", new)
                 out_edge.to._cf_in.remove(out_edge)
@@ -757,6 +776,7 @@ class ControlDataFlowGraph:
                 new = [
                     out_edge_map[out_edge, in_edge.from_]
                     for out_edge in old_outbound
+                    if (out_edge, in_edge.from_) in out_edge_map
                 ]
                 # print("  with", new)
                 in_edge.from_._cf_out.extend(new)
@@ -777,8 +797,8 @@ class ControlDataFlowGraph:
             self._floating_nodes.append(node)
             node._block = None
 
-
         except (ValueError, KeyError) as exc:
+            logger.debug("internal error", exc_info=True)
             raise RuntimeError("internal consistency error: {}".format(exc))
 
     def add_successor(self, at: Node, successor: Node, **kwargs):
