@@ -1399,18 +1399,6 @@ def load_asm(tree: lxml.etree.Element) -> ControlDataFlowGraph:
     result.simplify_basic_blocks()
     logger.debug("simplifed down to %d basic blocks", len(list(result.blocks)))
 
-    for node in list(result.nodes):
-        if node.block is None:
-            continue
-        if not isinstance(node, ASMNode):
-            continue
-        # if node.opcode == -1:
-        #     try:
-        #         result.detach_node(node)
-        #         result.remove_node(node)
-        #     except ValueError:
-        #         pass
-
     return result
 
 
