@@ -1016,7 +1016,7 @@ class ControlDataFlowGraph:
         # TODO: exception branches
 
         logger.debug("inlining graph with %d nodes as %r",
-                     len(method_cdfg))
+                     len(method_cdfg), inlined_id)
 
         inlined_id = inlined_id or ("urn:uuid:" + str(uuid.uuid4()))
 

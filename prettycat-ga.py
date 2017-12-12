@@ -374,9 +374,11 @@ def get_full_graph(args, graphs):
         inline_calls(args.method, cdfg, graphs)
 
     if args.simplify:
-        logging.debug("simplifying graph")
+        logging.debug("simplifying graph: strip_exceptional")
         cdfg.strip_exceptional()
+        logging.debug("simplifying graph: simplify_basic_blocks")
         cdfg.simplify_basic_blocks()
+        logging.debug("simplifying graph: strip_asm_stack_instructions")
         strip_asm_stack_instructions(cdfg)
 
     if args.strip_non_calls:
