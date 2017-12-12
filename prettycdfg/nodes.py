@@ -432,6 +432,10 @@ class ControlDataFlowGraph:
         self._floating_nodes = []
         self._node_id_index = {}
 
+    def __len__(self):
+        return (sum(len(block._nodes) for block in self._blocks) +
+                len(self._floating_nodes))
+
     def assert_edge_consistency(self, around_node):
         seen_in_edges = set()
         seen_out_edges = set()
@@ -929,6 +933,9 @@ class ControlDataFlowGraph:
         The blocks and nodes from `other_cdfg` are *copied* and added to this
         graph.
         """
+        logger.debug("merging %d nodes into graph with %d nodes",
+                     len(other_cdfg), len(self))
+
         blockmap = {
             old_block: self.new_block()
             for old_block in other_cdfg.blocks
@@ -1007,6 +1014,9 @@ class ControlDataFlowGraph:
         # TODO: parameters
         # TODO: return values
         # TODO: exception branches
+
+        logger.debug("inlining graph with %d nodes as %r",
+                     len(method_cdfg))
 
         inlined_id = inlined_id or ("urn:uuid:" + str(uuid.uuid4()))
 
